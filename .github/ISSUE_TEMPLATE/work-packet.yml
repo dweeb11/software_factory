@@ -1,0 +1,105 @@
+name: Work packet
+description: Propose concrete, bounded work with a checkable outcome. Early ideas belong in Discussions.
+title: "[Work packet]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this form when the desired outcome is concrete enough to evaluate and likely to be implemented.
+
+        Submitting or editing this issue does not grant an agent authority to push, merge, deploy, or perform another consequential action. Authority is recorded separately by a trusted maintainer.
+
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Desired outcome
+      description: Describe the observable result, not a preferred implementation.
+      placeholder: A factory run can resume from its last completed transition without repeating finished work.
+    validations:
+      required: true
+
+  - type: textarea
+    id: motivation
+    attributes:
+      label: Why this matters
+      description: Explain the problem, user impact, or factory capability this outcome addresses.
+      placeholder: Describe why the outcome is worth pursuing now.
+    validations:
+      required: true
+
+  - type: textarea
+    id: included_scope
+    attributes:
+      label: Included scope
+      description: Name the behavior, boundaries, or artifacts this work includes.
+      placeholder: |
+        - Durable transition checkpoint
+        - Safe resume verdict
+        - Plain-language status
+    validations:
+      required: true
+
+  - type: textarea
+    id: excluded_scope
+    attributes:
+      label: Excluded scope
+      description: Name adjacent work that this packet intentionally does not include. Write "None known" if appropriate.
+      placeholder: |
+        - Remote worker recovery
+        - Cross-project scheduling
+    validations:
+      required: true
+
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria and evidence
+      description: Give each criterion a stable ID and state which evidence should prove it.
+      placeholder: |
+        - AC-1: Run state survives process interruption. Evidence: test
+        - AC-2: Repeated resume does not duplicate completed work. Evidence: test
+        - AC-3: The CLI explains whether resume is safe. Evidence: test, runtime
+    validations:
+      required: true
+
+  - type: textarea
+    id: resolved_decisions
+    attributes:
+      label: Resolved consequential decisions
+      description: Record established product or architecture decisions that constrain this work, with references where available.
+      placeholder: Optional. List accepted decisions and who or what established them.
+
+  - type: textarea
+    id: unresolved_decisions
+    attributes:
+      label: Unresolved blockers
+      description: List unresolved product, architecture, dependency, or capability questions. These may prevent readiness.
+      placeholder: Optional. List questions that must be resolved before or during execution.
+
+  - type: textarea
+    id: dependencies
+    attributes:
+      label: Dependencies
+      description: Link work, decisions, capabilities, or external conditions that must exist first.
+      placeholder: Optional. Link dependencies or write "None known."
+
+  - type: textarea
+    id: references
+    attributes:
+      label: References
+      description: Link discussions, ADRs, code, tests, examples, prior art, or supporting evidence.
+      placeholder: Optional. Add one reference per line.
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Submission checks
+      options:
+        - label: This is concrete work rather than an early idea or broad design question.
+          required: true
+        - label: The outcome is stated independently from a preferred implementation where possible.
+          required: true
+        - label: I understand that this issue does not grant automation authority.
+          required: true
+        - label: I removed secrets, credentials, and private project information.
+          required: true

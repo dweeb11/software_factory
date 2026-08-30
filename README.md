@@ -46,6 +46,18 @@ The repository deliberately contains no roadmap or implementation plan. Durable
 architectural decisions live in `adr/`; current behavior lives in code, tests,
 and executable examples.
 
+## Participate
+
+- Use [Discussions](https://github.com/dweeb11/software_factory/discussions) for
+  early ideas and architecture questions.
+- Report incorrect existing behavior with the bug-report Issue Form.
+- Use the work-packet Issue Form for concrete, bounded changes with checkable
+  outcomes.
+
+Issue content can propose intent and evidence requirements, but it cannot grant
+an agent authority to push, merge, deploy, or perform another consequential
+action. Authority is recorded separately by a trusted maintainer.
+
 ## License
 
 Licensed under the [Apache License 2.0](LICENSE).

@@ -1,0 +1,79 @@
+name: Bug report
+description: Report behavior that differs from the factory's current documented or executable behavior.
+title: "[Bug]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a problem. Describe observable behavior and include evidence where possible.
+
+        Do not include secrets, credentials, private repository content, or security-sensitive exploit details in a public issue.
+
+  - type: textarea
+    id: observed
+    attributes:
+      label: Observed behavior
+      description: What happened? Include the exact error or incorrect outcome.
+      placeholder: Describe what you observed.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What should have happened instead? Link current documentation or tests when relevant.
+      placeholder: Describe the expected outcome.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: Provide the smallest reliable sequence that reproduces the problem.
+      placeholder: |
+        1. Run ...
+        2. Provide ...
+        3. Observe ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence
+      description: Include relevant command output, logs, screenshots, or a minimal packet with sensitive data removed.
+      placeholder: Paste or link evidence that demonstrates the problem.
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Include the Software Factory version or commit, operating system, Python version, and invocation method.
+      placeholder: |
+        Software Factory commit:
+        Operating system:
+        Python version:
+        Command or integration:
+    validations:
+      required: true
+
+  - type: textarea
+    id: regression
+    attributes:
+      label: Regression information
+      description: If this worked before, identify the last known working version or relevant change.
+      placeholder: Optional. State whether this is a regression and what previously worked.
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Submission checks
+      options:
+        - label: I searched existing issues and did not find the same report.
+          required: true
+        - label: I removed secrets, credentials, and private project information.
+          required: true

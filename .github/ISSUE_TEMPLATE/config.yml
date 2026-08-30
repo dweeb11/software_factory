@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Ideas and architecture discussions
+    url: https://github.com/dweeb11/software_factory/discussions
+    about: Explore possible capabilities, product ideas, and architecture questions before shaping concrete work.
+  - name: Report a security vulnerability privately
+    url: https://github.com/dweeb11/software_factory/security/advisories/new
+    about: Do not disclose security-sensitive details in a public issue.
