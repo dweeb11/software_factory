@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "id": "EXAMPLE-1",
+  "kind": "change",
+  "intent": "Users can restore a recently deleted project.",
+  "desired_outcome": "A deleted project can be restored with its members and settings intact.",
+  "scope": {
+    "include": [
+      "project recovery view",
+      "restoration behavior"
+    ],
+    "exclude": [
+      "account deletion",
+      "billing history"
+    ]
+  },
+  "acceptance": [
+    {
+      "id": "AC-1",
+      "statement": "A deleted project appears in the recovery view.",
+      "evidence_required": ["runtime"]
+    },
+    {
+      "id": "AC-2",
+      "statement": "Restoration preserves project members and settings.",
+      "evidence_required": ["test", "runtime"]
+    }
+  ],
+  "decisions": [
+    {
+      "id": "D-1",
+      "question": "Where is the retention rule enforced?",
+      "state": "resolved",
+      "decision": "The application persistence boundary enforces retention.",
+      "decided_by": "operator"
+    }
+  ],
+  "authority": {
+    "mode": "deliver",
+    "granted_by": "operator",
+    "allow": [],
+    "deny": ["merge", "deploy"]
+  }
+}
