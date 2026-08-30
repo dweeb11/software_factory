@@ -4,7 +4,8 @@ import argparse
 import sys
 from collections.abc import Sequence
 
-from .presentation import render_work_packet
+from .presentation import render_readiness, render_work_packet
+from .readiness import evaluate_readiness
 from .work_packets import PacketError, WorkPacket
 
 
@@ -27,6 +28,12 @@ def build_parser() -> argparse.ArgumentParser:
         "show", help="Explain a work packet and its authority in plain language."
     )
     show.add_argument("path", help="Path to a work packet JSON file.")
+
+    readiness = packet_commands.add_parser(
+        "readiness",
+        help="Explain whether a valid work packet is sufficiently defined for execution.",
+    )
+    readiness.add_argument("path", help="Path to a work packet JSON file.")
     return parser
 
 
@@ -44,5 +51,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.packet_command == "show":
         print(render_work_packet(packet), end="")
         return 0
+    if args.packet_command == "readiness":
+        report = evaluate_readiness(packet)
+        print(render_readiness(report), end="")
+        return 0 if report.ready else 1
 
     raise AssertionError(f"unhandled packet command: {args.packet_command}")

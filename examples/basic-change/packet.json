@@ -35,6 +35,7 @@
       "decided_by": "operator"
     }
   ],
+  "dependencies": [],
   "authority": {
     "mode": "deliver",
     "granted_by": "operator",

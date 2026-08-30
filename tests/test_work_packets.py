@@ -31,6 +31,7 @@ class WorkPacketTests(unittest.TestCase):
         self.assertEqual(packet.id, "EXAMPLE-1")
         self.assertEqual(packet.kind, "change")
         self.assertFalse(packet.unresolved_decisions)
+        self.assertEqual(packet.dependencies, ())
 
     def test_missing_intent_is_rejected(self) -> None:
         data = example_data()
@@ -51,6 +52,13 @@ class WorkPacketTests(unittest.TestCase):
         data["acceptance"].append(copy.deepcopy(data["acceptance"][0]))
 
         with self.assertRaisesRegex(PacketError, "duplicate acceptance criterion id"):
+            WorkPacket.from_mapping(data)
+
+    def test_empty_evidence_requirement_is_rejected(self) -> None:
+        data = example_data()
+        data["acceptance"][0]["evidence_required"] = []
+
+        with self.assertRaisesRegex(PacketError, "evidence_required must not be empty"):
             WorkPacket.from_mapping(data)
 
     def test_unknown_evidence_kind_is_rejected(self) -> None:
@@ -92,7 +100,8 @@ class WorkPacketTests(unittest.TestCase):
         self.assertIn("Evidence required: test, runtime", rendered)
         self.assertIn("May: commit, edit, open-pr, push, update-pr, update-tracker", rendered)
         self.assertIn("Explicit denials: deploy, merge", rendered)
-        self.assertIn("Human action required\n  None before execution.", rendered)
+        self.assertIn("No dependencies are recorded.", rendered)
+        self.assertIn("Packet readiness\n  No packet-definition blockers were found.", rendered)
 
     def test_plain_language_view_surfaces_unresolved_decisions(self) -> None:
         data = example_data()
@@ -108,7 +117,7 @@ class WorkPacketTests(unittest.TestCase):
         rendered = render_work_packet(packet)
 
         self.assertIn("? D-2: Should recovery be visible to project members?", rendered)
-        self.assertIn("Resolve 1 decision(s) before execution.", rendered)
+        self.assertIn("D-2 is unresolved: Should recovery be visible to project members?", rendered)
 
 
 class CommandLineTests(unittest.TestCase):

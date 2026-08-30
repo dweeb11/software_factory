@@ -7,7 +7,7 @@ name = "software-factory"
 version = "0.1.0"
 description = "Turn explicit intent and authority into verified software outcomes"
 license = {file = "LICENSE"}
-requires-python = ">=3.11"
+requires-python = ">=3.9"
 dependencies = []
 
 [project.scripts]

@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "id": "EXAMPLE-2",
+  "kind": "change",
+  "intent": "Project members can discover recently deleted projects.",
+  "desired_outcome": "The recovery experience is defined well enough to implement.",
+  "scope": {
+    "include": [],
+    "exclude": ["permanent deletion"]
+  },
+  "acceptance": [
+    {
+      "id": "AC-1",
+      "statement": "The chosen recovery experience can be exercised on the real interface.",
+      "evidence_required": ["runtime"]
+    }
+  ],
+  "decisions": [
+    {
+      "id": "D-2",
+      "question": "Should every project member see deleted projects?",
+      "state": "unresolved"
+    }
+  ],
+  "dependencies": [
+    {
+      "id": "PACKET-12",
+      "state": "unknown"
+    }
+  ],
+  "authority": {
+    "mode": "deliver",
+    "granted_by": "operator",
+    "allow": [],
+    "deny": ["merge", "deploy"]
+  }
+}

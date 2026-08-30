@@ -32,15 +32,28 @@ The first executable slice defines and validates:
 - a versioned work packet;
 - acceptance criteria with evidence requirements;
 - resolved and unresolved decisions;
+- generic dependency states;
 - an authority envelope with explicit grants and denials;
-- a plain-language packet view.
+- a computed packet-readiness verdict;
+- plain-language packet and readiness views.
 
 Validate or inspect the included example after installing the package:
 
 ```sh
 factory packet validate examples/basic-change/packet.json
 factory packet show examples/basic-change/packet.json
+factory packet readiness examples/basic-change/packet.json
+factory packet readiness examples/blocked-change/packet.json
 ```
+
+Readiness is a read-only packet-definition check. It does not create a run or
+perform execution preflight.
+
+| Exit code | Meaning |
+|---:|---|
+| `0` | The packet is ready to enter run preflight. |
+| `1` | The packet is valid but has readiness blockers. |
+| `2` | The packet is unreadable or malformed. |
 
 The repository deliberately contains no roadmap or implementation plan. Durable
 architectural decisions live in `adr/`; current behavior lives in code, tests,

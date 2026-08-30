@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from .readiness import ReadinessReport, evaluate_readiness
 from .work_packets import AUTHORITY_ACTIONS, WorkPacket
 
 
@@ -31,34 +32,79 @@ def render_work_packet(packet: WorkPacket) -> str:
         else:
             lines.append(f"  ? {decision.id}: {decision.question}")
 
-    effective = packet.authority.effective_actions
-    explicitly_denied = packet.authority.deny
-    unavailable = AUTHORITY_ACTIONS - effective
-    lines.extend(
-        [
-            "",
-            "Authority",
-            f"  Mode: {packet.authority.mode}",
-            f"  Granted by: {packet.authority.granted_by}",
-            f"  May: {_joined(effective)}",
-            f"  May not: {_joined(unavailable)}",
-        ]
-    )
-    if explicitly_denied:
-        lines.append(f"  Explicit denials: {_joined(explicitly_denied)}")
+    lines.extend(["", "Dependencies"])
+    if not packet.dependencies:
+        lines.append("  No dependencies are recorded.")
+    for dependency in packet.dependencies:
+        lines.append(f"  - {dependency.id}: {dependency.state}")
 
-    if packet.unresolved_decisions:
+    lines.extend(_render_authority(packet))
+
+    readiness = evaluate_readiness(packet)
+    lines.extend(["", "Packet readiness"])
+    if readiness.ready:
+        lines.append("  No packet-definition blockers were found.")
+    else:
+        lines.extend(f"  • {blocker.message}" for blocker in readiness.blockers)
+
+    return "\n".join(lines) + "\n"
+
+
+def render_readiness(report: ReadinessReport) -> str:
+    packet = report.packet
+    status = (
+        "ready for run preflight"
+        if report.ready
+        else "not ready for run preflight"
+    )
+    lines = [
+        f"{packet.id} is {status}.",
+        "",
+        "Outcome",
+        f"  {packet.desired_outcome}",
+    ]
+
+    if report.ready:
+        criterion_count = len(packet.acceptance)
+        criterion_label = "criterion is" if criterion_count == 1 else "criteria are"
         lines.extend(
             [
                 "",
-                "Human action required",
-                f"  Resolve {len(packet.unresolved_decisions)} decision(s) before execution.",
+                "Packet checks",
+                f"  ✓ {criterion_count} acceptance {criterion_label} defined.",
+                "  ✓ Every criterion names required evidence.",
+                "  ✓ No consequential decisions remain unresolved.",
+                "  ✓ Every dependency is satisfied.",
             ]
         )
     else:
-        lines.extend(["", "Human action required", "  None before execution."])
+        lines.extend(["", "Blockers"])
+        lines.extend(f"  • {blocker.message}" for blocker in report.blockers)
 
+    lines.extend(_render_authority(packet))
+    lines.extend(
+        [
+            "",
+            "No run was started and no external action was performed.",
+        ]
+    )
     return "\n".join(lines) + "\n"
+
+
+def _render_authority(packet: WorkPacket) -> list[str]:
+    effective = packet.authority.effective_actions
+    unavailable = AUTHORITY_ACTIONS - effective
+    lines = [
+        "",
+        "Authority",
+        f"  Mode: {packet.authority.mode}",
+        f"  Granted by: {packet.authority.granted_by}",
+        f"  May: {_joined(effective)}",
+        f"  May not: {_joined(unavailable)}",
+    ]
+    if packet.authority.deny:
+        lines.append(f"  Explicit denials: {_joined(packet.authority.deny)}")
+    return lines
 
 
 def _render_items(label: str, values: tuple[str, ...]) -> list[str]:
