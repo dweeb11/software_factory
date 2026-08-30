@@ -2,10 +2,26 @@ from __future__ import annotations
 
 import argparse
 import sys
-from collections.abc import Sequence
+import uuid
+from collections.abc import Callable, Sequence
+from datetime import datetime, timezone
+from pathlib import Path
 
-from .presentation import render_readiness, render_work_packet
+from .presentation import (
+    render_readiness,
+    render_run,
+    render_run_initialized,
+    render_work_packet,
+)
 from .readiness import evaluate_readiness
+from .runs import (
+    RunError,
+    RunPersistenceError,
+    RunPublicationError,
+    RunRecord,
+    initialize_run,
+    persist_run,
+)
 from .work_packets import PacketError, WorkPacket
 
 
@@ -31,14 +47,50 @@ def build_parser() -> argparse.ArgumentParser:
 
     readiness = packet_commands.add_parser(
         "readiness",
-        help="Explain whether a valid work packet is sufficiently defined for execution.",
+        help="Explain whether a valid work packet is ready to enter run preflight.",
     )
     readiness.add_argument("path", help="Path to a work packet JSON file.")
+
+    run = commands.add_parser("run", help="Create and inspect durable factory runs.")
+    run_commands = run.add_subparsers(dest="run_command", required=True)
+
+    initialize = run_commands.add_parser(
+        "init", help="Initialize a durable run from a ready work packet."
+    )
+    initialize.add_argument("packet_path", help="Path to a work packet JSON file.")
+    initialize.add_argument("run_path", help="New path for the run JSON record.")
+    initialize.add_argument(
+        "--initiated-by",
+        required=True,
+        help="Identity recording the run initialization.",
+    )
+
+    run_show = run_commands.add_parser(
+        "show", help="Explain a durable run record in plain language."
+    )
+    run_show.add_argument("path", help="Path to a run JSON record.")
     return parser
 
 
-def main(argv: Sequence[str] | None = None) -> int:
+def main(
+    argv: Sequence[str] | None = None,
+    *,
+    run_id_factory: Callable[[], str] | None = None,
+    clock: Callable[[], datetime] | None = None,
+) -> int:
     args = build_parser().parse_args(argv)
+    if args.command == "packet":
+        return _handle_packet(args)
+    if args.command == "run":
+        return _handle_run(
+            args,
+            run_id_factory=run_id_factory or _new_run_id,
+            clock=clock or _utc_now,
+        )
+    raise AssertionError(f"unhandled command: {args.command}")
+
+
+def _handle_packet(args: argparse.Namespace) -> int:
     try:
         packet = WorkPacket.from_path(args.path)
     except PacketError as error:
@@ -57,3 +109,68 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0 if report.ready else 1
 
     raise AssertionError(f"unhandled packet command: {args.packet_command}")
+
+
+def _handle_run(
+    args: argparse.Namespace,
+    *,
+    run_id_factory: Callable[[], str],
+    clock: Callable[[], datetime],
+) -> int:
+    if args.run_command == "show":
+        try:
+            record = RunRecord.from_path(args.path)
+        except RunError as error:
+            print(f"Blocked: {error}", file=sys.stderr)
+            return 2
+        print(render_run(record), end="")
+        return 0
+
+    if args.run_command == "init":
+        packet_path = Path(args.packet_path)
+        try:
+            packet_content = packet_path.read_bytes()
+        except OSError as error:
+            print(f"Blocked: cannot read packet {packet_path}: {error}", file=sys.stderr)
+            return 2
+
+        try:
+            initialization = initialize_run(
+                packet_content,
+                run_id=run_id_factory(),
+                initiated_by=args.initiated_by,
+                now=clock(),
+                source=f"packet {packet_path}",
+            )
+        except (PacketError, RunError) as error:
+            print(f"Blocked: {error}", file=sys.stderr)
+            return 2
+
+        if not initialization.initialized:
+            print(render_readiness(initialization.readiness), end="")
+            return 1
+
+        record = initialization.record
+        if record is None:
+            raise AssertionError("initialized result must contain a run record")
+        try:
+            persist_run(record, args.run_path)
+        except RunPublicationError as error:
+            print(f"Initialization requires inspection: {error}", file=sys.stderr)
+            return 3
+        except RunPersistenceError as error:
+            print(f"Not initialized: {error}", file=sys.stderr)
+            return 3
+
+        print(render_run_initialized(record, args.run_path), end="")
+        return 0
+
+    raise AssertionError(f"unhandled run command: {args.run_command}")
+
+
+def _new_run_id() -> str:
+    return f"RUN-{uuid.uuid4()}"
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)

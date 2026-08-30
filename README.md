@@ -21,7 +21,7 @@ flowchart LR
 - The factory owns routine, reversible implementation judgment.
 - Proof that work is complete does not grant permission to merge or deploy it.
 - Unknown, stale, or malformed state blocks consequential actions.
-- Every run must end complete, blocked, cancelled, or failed by name.
+- Every run must end complete, blocked, cancelled, exhausted, or failed by name.
 - Repository code and executable data structures are authoritative.
 - Human-facing commands must explain that state in plain language.
 
@@ -35,7 +35,9 @@ The first executable slice defines and validates:
 - generic dependency states;
 - an authority envelope with explicit grants and denials;
 - a computed packet-readiness verdict;
-- plain-language packet and readiness views.
+- a durable run bound to an exact work-packet version;
+- run state derived from validated transition history;
+- plain-language packet, readiness, and run views.
 
 Validate or inspect the included example after installing the package:
 
@@ -54,6 +56,37 @@ perform execution preflight.
 | `0` | The packet is ready to enter run preflight. |
 | `1` | The packet is valid but has readiness blockers. |
 | `2` | The packet is unreadable or malformed. |
+
+Initialize a durable run without starting execution:
+
+```sh
+factory run init examples/basic-change/packet.json ./run.json \
+  --initiated-by operator
+factory run show ./run.json
+
+# Exits 1 and creates no run record because the packet is blocked.
+factory run init examples/blocked-change/packet.json ./blocked-run.json \
+  --initiated-by operator
+```
+
+Run initialization evaluates readiness again, binds the run to the SHA-256 digest
+of the exact packet bytes, and creates only the initial lifecycle transition. It
+does not start a worker, perform execution preflight, or grant authority.
+
+| Exit code | `run init` meaning |
+|---:|---|
+| `0` | The initialized run was persisted. |
+| `1` | The packet is valid but blocked; no run was created. |
+| `2` | Input is unreadable or malformed. |
+| `3` | Persistence did not complete cleanly; the message states whether no run was created or a published record requires inspection. |
+
+Never retry exit `3` blindly. If the message says initialization requires
+inspection, examine the named run record first; a complete record may already
+exist even though durable publication or temporary cleanup could not be
+confirmed.
+
+Run-record destinations are explicit and are never overwritten. The factory does
+not yet choose a global run directory or storage backend.
 
 The repository deliberately contains no roadmap or implementation plan. Durable
 architectural decisions live in `adr/`; current behavior lives in code, tests,

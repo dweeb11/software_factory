@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from .readiness import ReadinessReport, evaluate_readiness
+from .runs import RunRecord
 from .work_packets import AUTHORITY_ACTIONS, WorkPacket
 
 
@@ -89,6 +90,50 @@ def render_readiness(report: ReadinessReport) -> str:
         ]
     )
     return "\n".join(lines) + "\n"
+
+
+def render_run(record: RunRecord) -> str:
+    terminal = "yes" if record.terminal else "no"
+    lines = [
+        f"{record.id} is {record.current_state}.",
+        "",
+        "Work packet",
+        f"  ID: {record.packet.id}",
+        f"  Exact version: {record.packet.digest}",
+        "",
+        "Readiness observation",
+        "  ✓ The packet was ready when this run was initialized.",
+        f"  Evaluator: {record.readiness.evaluator}",
+        f"  Observed at: {record.readiness.evaluated_at}",
+        "  This historical observation must not authorize a later action.",
+        "",
+        "Lifecycle",
+        f"  Current state: {record.current_state}",
+        f"  Terminal: {terminal}",
+        f"  Initiated by: {record.initiated_by}",
+        "",
+        "Transition history",
+    ]
+    for transition in record.transitions:
+        from_state = transition.from_state or "nothing"
+        reason = transition.reason.replace("-", " ")
+        transition_line = f"  {transition.sequence}. {from_state} → {transition.to_state} at {transition.at} by {transition.recorded_by}"
+        lines.append(transition_line)
+        lines.append(f"     Reason: {reason}")
+
+    lines.extend(
+        [
+            "",
+            "Execution and authority",
+            "  Initializing this run did not start a worker or perform an external action.",
+            "  This run record does not grant authority to act.",
+        ]
+    )
+    return "\n".join(lines) + "\n"
+
+
+def render_run_initialized(record: RunRecord, path: str) -> str:
+    return f"Run initialized at {path}.\n\n{render_run(record)}"
 
 
 def _render_authority(packet: WorkPacket) -> list[str]:

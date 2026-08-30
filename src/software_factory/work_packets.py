@@ -112,16 +112,24 @@ class WorkPacket:
     def from_path(cls, path: str | Path) -> WorkPacket:
         packet_path = Path(path)
         try:
-            raw = cast(object, json.loads(packet_path.read_text(encoding="utf-8")))
-        except UnicodeDecodeError as error:
-            raise PacketError(
-                f"packet {packet_path} is not valid UTF-8: byte {error.start}"
-            ) from error
+            raw_bytes = packet_path.read_bytes()
         except OSError as error:
             raise PacketError(f"cannot read packet {packet_path}: {error}") from error
+        return cls.from_bytes(raw_bytes, source=f"packet {packet_path}")
+
+    @classmethod
+    def from_bytes(cls, raw_bytes: bytes, *, source: str = "packet") -> WorkPacket:
+        try:
+            text = raw_bytes.decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise PacketError(
+                f"{source} is not valid UTF-8: byte {error.start}"
+            ) from error
+        try:
+            raw = cast(object, json.loads(text))
         except json.JSONDecodeError as error:
             raise PacketError(
-                f"packet {packet_path} is not valid JSON: line {error.lineno}, column {error.colno}"
+                f"{source} is not valid JSON: line {error.lineno}, column {error.colno}"
             ) from error
         return cls.from_mapping(raw)
 
