@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import cast
 
+from .json_records import DuplicateJsonMemberError, parse_json
 from .readiness import ReadinessReport, evaluate_readiness
 from .work_packets import WorkPacket
 
@@ -112,11 +113,13 @@ class RunRecord:
             ) from error
 
         try:
-            raw = cast(object, json.loads(text))
+            raw = parse_json(text)
         except json.JSONDecodeError as error:
             raise RunError(
                 f"run {run_path} is not valid JSON: line {error.lineno}, column {error.colno}"
             ) from error
+        except DuplicateJsonMemberError as error:
+            raise RunError(f"run {run_path} is ambiguous: {error}") from error
         return cls.from_mapping(raw)
 
     @classmethod

@@ -37,7 +37,9 @@ The first executable slice defines and validates:
 - a computed packet-readiness verdict;
 - a durable run bound to an exact work-packet version;
 - run state derived from validated transition history;
-- plain-language packet, readiness, and run views.
+- a versioned execution-environment snapshot with observation provenance;
+- deterministic execution preflight over current run, packet, and environment facts;
+- plain-language packet, readiness, run, and preflight views.
 
 Validate or inspect the included example after installing the package:
 
@@ -87,6 +89,41 @@ confirmed.
 
 Run-record destinations are explicit and are never overwritten. The factory does
 not yet choose a global run directory or storage backend.
+
+Evaluate collected execution facts without acquiring ownership or starting a
+worker:
+
+```sh
+factory run preflight \
+  examples/initialized-run/run.json \
+  examples/basic-change/packet.json \
+  examples/preflight-ready/environment.json
+
+factory run preflight \
+  examples/initialized-run/run.json \
+  examples/basic-change/packet.json \
+  examples/preflight-blocked/environment.json
+```
+
+The checked-in environment snapshots use fixed timestamps so tests can pin the
+evaluation time. At another wall-clock time they correctly block as stale; a real
+collector must generate a fresh snapshot.
+
+Collectors may be deterministic probes, adapters, inspection agents, or humans.
+They report observations and provenance; they do not decide the verdict. The
+preflight evaluator deterministically checks freshness, packet identity and
+readiness, run state, controller availability, workspace isolation, execution
+capabilities, verification routes, requested worker actions, and authority state.
+
+| Exit code | `run preflight` meaning |
+|---:|---|
+| `0` | Current collected facts pass execution preflight. |
+| `1` | Inputs are valid, but every current blocker is reported. |
+| `2` | A run, packet, snapshot, or evaluation parameter is unreadable or malformed. |
+
+A passing verdict is not an activation token. Preflight acquires no controller
+ownership, records no transition, starts no worker, and performs no external
+action. Mutable facts must be checked again during guarded activation.
 
 The repository deliberately contains no roadmap or implementation plan. Durable
 architectural decisions live in `adr/`; current behavior lives in code, tests,

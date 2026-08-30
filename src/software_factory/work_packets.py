@@ -1,9 +1,11 @@
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
+from json import JSONDecodeError
 from pathlib import Path
 from typing import cast
+
+from .json_records import DuplicateJsonMemberError, parse_json
 
 
 PACKET_KINDS = frozenset({"inquiry", "experiment", "change", "program"})
@@ -126,11 +128,13 @@ class WorkPacket:
                 f"{source} is not valid UTF-8: byte {error.start}"
             ) from error
         try:
-            raw = cast(object, json.loads(text))
-        except json.JSONDecodeError as error:
+            raw = parse_json(text)
+        except JSONDecodeError as error:
             raise PacketError(
                 f"{source} is not valid JSON: line {error.lineno}, column {error.colno}"
             ) from error
+        except DuplicateJsonMemberError as error:
+            raise PacketError(f"{source} is ambiguous: {error}") from error
         return cls.from_mapping(raw)
 
     @classmethod

@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "id": "RUN-PREFLIGHT-1",
+  "packet": {
+    "id": "EXAMPLE-1",
+    "digest": "sha256:db4af24c700af6c638fbbcce40d2826aa590fd8c1fce906e140e2eef92f303aa"
+  },
+  "initiated_by": "operator",
+  "readiness": {
+    "evaluator": "packet-readiness-v1",
+    "evaluated_at": "2026-08-30T12:00:00Z",
+    "ready": true,
+    "blockers": []
+  },
+  "transitions": [
+    {
+      "sequence": 0,
+      "at": "2026-08-30T12:00:00Z",
+      "from": null,
+      "to": "initialized",
+      "reason": "packet-ready",
+      "recorded_by": "operator"
+    }
+  ]
+}

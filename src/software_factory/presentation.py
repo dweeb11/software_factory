@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from .preflight import PreflightReport
 from .readiness import ReadinessReport, evaluate_readiness
 from .runs import RunRecord
 from .work_packets import AUTHORITY_ACTIONS, WorkPacket
@@ -134,6 +135,78 @@ def render_run(record: RunRecord) -> str:
 
 def render_run_initialized(record: RunRecord, path: str) -> str:
     return f"Run initialized at {path}.\n\n{render_run(record)}"
+
+
+def render_preflight(report: PreflightReport) -> str:
+    status = "passes the current execution preflight" if report.ready else "is blocked from execution"
+    environment = report.environment
+    lines = [
+        f"{report.run.id} {status}.",
+        "",
+        "Packet binding",
+        f"  Run packet: {report.run.packet.id}",
+        f"  Exact version: {report.run.packet.digest}",
+        "  ✓ Current packet identity was checked against the run.",
+        "",
+        "Collected environment",
+        f"  Snapshot generated at: {environment.generated_at}",
+        f"  Controller: {environment.controller.id} ({environment.controller.state})",
+        f"  Controller observed by: {environment.controller.observed_by}",
+        f"  Workspace: {environment.workspace.id}",
+        f"  Available: {'yes' if environment.workspace.available else 'no'}",
+        f"  Isolated: {'yes' if environment.workspace.isolated else 'no'}",
+        f"  Clean: {'yes' if environment.workspace.clean else 'no'}",
+        f"  Workspace observed by: {environment.workspace.observed_by}",
+        "",
+        "Execution capabilities",
+    ]
+    for capability in environment.capabilities:
+        marker = "✓" if capability.available else "×"
+        lines.append(
+            f"  {marker} {capability.name} — observed by {capability.observed_by}"
+        )
+
+    lines.extend(["", "Verification routes"])
+    for route in environment.verification_routes:
+        marker = "✓" if route.available else "×"
+        lines.append(f"  {marker} {route.kind} — observed by {route.observed_by}")
+
+    lines.extend(
+        [
+            "",
+            "Requested worker actions",
+            f"  {_joined(environment.requested_actions)}",
+            f"  Packet authority mode: {report.packet.authority.mode}",
+            f"  Authority state: {environment.authority.state}",
+            f"  Authority observed by: {environment.authority.observed_by}",
+        ]
+    )
+
+    if report.ready:
+        lines.extend(
+            [
+                "",
+                "Preflight checks",
+                "  ✓ The run is initialized.",
+                "  ✓ Packet readiness was recomputed.",
+                "  ✓ Required capabilities and verification routes are available.",
+                "  ✓ Requested worker actions remain inside the restricted boundary.",
+            ]
+        )
+    else:
+        lines.extend(["", "Blockers"])
+        lines.extend(f"  • {blocker.message}" for blocker in report.blockers)
+
+    lines.extend(
+        [
+            "",
+            "Collector observations report state; they do not grant authority.",
+            "A passing preflight verdict is not an activation token.",
+            "No controller ownership was acquired, no run transition was recorded,",
+            "and no worker or external action was started.",
+        ]
+    )
+    return "\n".join(lines) + "\n"
 
 
 def _render_authority(packet: WorkPacket) -> list[str]:

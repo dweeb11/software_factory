@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-08-30T12:05:00Z",
+  "run_id": "RUN-PREFLIGHT-1",
+  "controller": {
+    "id": "controller-2",
+    "state": "contended",
+    "observed_by": "controller-probe"
+  },
+  "workspace": {
+    "id": "workspace-2",
+    "available": false,
+    "isolated": false,
+    "clean": false,
+    "observed_by": "workspace-probe"
+  },
+  "capabilities": [
+    {
+      "name": "workspace-read",
+      "available": false,
+      "observed_by": "workspace-probe"
+    }
+  ],
+  "verification_routes": [
+    {
+      "kind": "test",
+      "available": false,
+      "observed_by": "repository-inspector"
+    }
+  ],
+  "requested_actions": ["push"],
+  "authority": {
+    "state": "unknown",
+    "observed_by": "authority-collector"
+  }
+}

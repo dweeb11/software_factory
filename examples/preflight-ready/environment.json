@@ -1,0 +1,51 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-08-30T12:05:00Z",
+  "run_id": "RUN-PREFLIGHT-1",
+  "controller": {
+    "id": "controller-1",
+    "state": "available",
+    "observed_by": "controller-probe"
+  },
+  "workspace": {
+    "id": "workspace-1",
+    "available": true,
+    "isolated": true,
+    "clean": true,
+    "observed_by": "workspace-probe"
+  },
+  "capabilities": [
+    {
+      "name": "workspace-read",
+      "available": true,
+      "observed_by": "workspace-probe"
+    },
+    {
+      "name": "workspace-write",
+      "available": true,
+      "observed_by": "workspace-probe"
+    },
+    {
+      "name": "command-execution",
+      "available": true,
+      "observed_by": "runtime-probe"
+    }
+  ],
+  "verification_routes": [
+    {
+      "kind": "test",
+      "available": true,
+      "observed_by": "repository-inspector"
+    },
+    {
+      "kind": "runtime",
+      "available": true,
+      "observed_by": "repository-inspector"
+    }
+  ],
+  "requested_actions": ["edit"],
+  "authority": {
+    "state": "current",
+    "observed_by": "operator"
+  }
+}

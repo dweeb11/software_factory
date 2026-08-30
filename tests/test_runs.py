@@ -132,6 +132,16 @@ class RunInitializationTests(unittest.TestCase):
 
 
 class RunRecordTests(unittest.TestCase):
+    def test_duplicate_json_member_is_rejected_as_ambiguous(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "run.json"
+            path.write_text(
+                '{"schema_version": 1, "schema_version": 1}', encoding="utf-8"
+            )
+
+            with self.assertRaisesRegex(RunError, "ambiguous: duplicate JSON member"):
+                RunRecord.from_path(path)
+
     def test_current_state_is_derived_from_last_valid_transition(self) -> None:
         data = run_data()
         data["transitions"].append(

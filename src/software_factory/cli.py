@@ -7,7 +7,9 @@ from collections.abc import Callable, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 
+from .preflight import ExecutionEnvironment, PreflightError, evaluate_preflight
 from .presentation import (
+    render_preflight,
     render_readiness,
     render_run,
     render_run_initialized,
@@ -69,6 +71,21 @@ def build_parser() -> argparse.ArgumentParser:
         "show", help="Explain a durable run record in plain language."
     )
     run_show.add_argument("path", help="Path to a run JSON record.")
+
+    preflight = run_commands.add_parser(
+        "preflight", help="Evaluate current execution facts without starting a worker."
+    )
+    preflight.add_argument("run_path", help="Path to an initialized run JSON record.")
+    preflight.add_argument("packet_path", help="Path to the exact work packet JSON file.")
+    preflight.add_argument(
+        "environment_path", help="Path to a collected execution-environment snapshot."
+    )
+    preflight.add_argument(
+        "--max-age-seconds",
+        type=int,
+        default=300,
+        help="Maximum accepted environment snapshot age (default: 300).",
+    )
     return parser
 
 
@@ -125,6 +142,29 @@ def _handle_run(
             return 2
         print(render_run(record), end="")
         return 0
+
+    if args.run_command == "preflight":
+        packet_path = Path(args.packet_path)
+        try:
+            record = RunRecord.from_path(args.run_path)
+            packet_content = packet_path.read_bytes()
+            environment = ExecutionEnvironment.from_path(args.environment_path)
+            report = evaluate_preflight(
+                record,
+                packet_content,
+                environment,
+                now=clock(),
+                max_age_seconds=args.max_age_seconds,
+            )
+        except OSError as error:
+            print(f"Blocked: cannot read packet {packet_path}: {error}", file=sys.stderr)
+            return 2
+        except (PacketError, PreflightError, RunError) as error:
+            print(f"Blocked: {error}", file=sys.stderr)
+            return 2
+
+        print(render_preflight(report), end="")
+        return 0 if report.ready else 1
 
     if args.run_command == "init":
         packet_path = Path(args.packet_path)

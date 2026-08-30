@@ -47,6 +47,16 @@ class WorkPacketTests(unittest.TestCase):
         with self.assertRaisesRegex(PacketError, "kind must be one of"):
             WorkPacket.from_mapping(data)
 
+    def test_duplicate_json_member_is_rejected_as_ambiguous(self) -> None:
+        text = EXAMPLE_PATH.read_text(encoding="utf-8")
+        ambiguous = text.replace(
+            '"id": "EXAMPLE-1",',
+            '"id": "OTHER",\n  "id": "EXAMPLE-1",',
+        )
+
+        with self.assertRaisesRegex(PacketError, "ambiguous: duplicate JSON member: id"):
+            WorkPacket.from_bytes(ambiguous.encode("utf-8"))
+
     def test_duplicate_acceptance_ids_are_rejected(self) -> None:
         data = example_data()
         data["acceptance"].append(copy.deepcopy(data["acceptance"][0]))
