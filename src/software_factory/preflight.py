@@ -13,7 +13,9 @@ from .runs import RunRecord
 from .work_packets import AUTHORITY_ACTIONS, EVIDENCE_KINDS, WorkPacket
 
 
-CONTROLLER_STATES = frozenset({"available", "contended", "unknown"})
+EXECUTION_PREFLIGHT_EVALUATOR = "execution-preflight-v1"
+CONTROLLER_STATES_V1 = frozenset({"available", "contended", "unknown"})
+CONTROLLER_STATES = CONTROLLER_STATES_V1 | {"owned"}
 AUTHORITY_STATES = frozenset({"current", "revoked", "unknown"})
 EXECUTION_CAPABILITIES = frozenset(
     {"workspace-read", "workspace-write", "command-execution"}
@@ -125,13 +127,16 @@ class ExecutionEnvironment:
         )
 
         schema_version = data.get("schema_version")
-        if type(schema_version) is not int or schema_version != 1:
-            raise PreflightError("schema_version must be the integer 1")
+        if type(schema_version) is not int or schema_version not in {1, 2}:
+            raise PreflightError("schema_version must be the integer 1 or 2")
 
         controller_data = _mapping(data.get("controller"), "controller")
         _require_fields(controller_data, {"id", "state", "observed_by"}, "controller")
+        controller_states = (
+            CONTROLLER_STATES_V1 if schema_version == 1 else CONTROLLER_STATES
+        )
         controller_state = _choice(
-            controller_data.get("state"), "controller.state", CONTROLLER_STATES
+            controller_data.get("state"), "controller.state", controller_states
         )
         controller = ControllerObservation(
             id=_text(controller_data.get("id"), "controller.id"),
@@ -180,6 +185,46 @@ class ExecutionEnvironment:
             authority=authority,
         )
 
+    def to_mapping(self) -> dict[str, object]:
+        return {
+            "schema_version": self.schema_version,
+            "generated_at": self.generated_at,
+            "run_id": self.run_id,
+            "controller": {
+                "id": self.controller.id,
+                "state": self.controller.state,
+                "observed_by": self.controller.observed_by,
+            },
+            "workspace": {
+                "id": self.workspace.id,
+                "available": self.workspace.available,
+                "isolated": self.workspace.isolated,
+                "clean": self.workspace.clean,
+                "observed_by": self.workspace.observed_by,
+            },
+            "capabilities": [
+                {
+                    "name": capability.name,
+                    "available": capability.available,
+                    "observed_by": capability.observed_by,
+                }
+                for capability in self.capabilities
+            ],
+            "verification_routes": [
+                {
+                    "kind": route.kind,
+                    "available": route.available,
+                    "observed_by": route.observed_by,
+                }
+                for route in self.verification_routes
+            ],
+            "requested_actions": sorted(self.requested_actions),
+            "authority": {
+                "state": self.authority.state,
+                "observed_by": self.authority.observed_by,
+            },
+        }
+
 
 @dataclass(frozen=True)
 class PreflightBlocker:
@@ -193,6 +238,7 @@ class PreflightReport:
     packet: WorkPacket
     environment: ExecutionEnvironment
     packet_readiness: ReadinessReport
+    required_controller_state: str
     blockers: tuple[PreflightBlocker, ...]
 
     @property
@@ -207,9 +253,14 @@ def evaluate_preflight(
     *,
     now: datetime,
     max_age_seconds: int = 300,
+    required_controller_state: str = "available",
 ) -> PreflightReport:
     if type(max_age_seconds) is not int or max_age_seconds < 1:
         raise PreflightError("max_age_seconds must be an integer of at least 1")
+    if required_controller_state not in {"available", "owned"}:
+        raise PreflightError(
+            "required_controller_state must be available or owned"
+        )
     _validate_environment(environment)
     current_time = _aware_utc(now, "now")
     packet = WorkPacket.from_bytes(packet_content)
@@ -288,11 +339,14 @@ def evaluate_preflight(
             )
         )
 
-    if environment.controller.state != "available":
+    if environment.controller.state != required_controller_state:
         blockers.append(
             PreflightBlocker(
                 code=f"controller-{environment.controller.state}",
-                message=f"Controller ownership is {environment.controller.state}, not available.",
+                message=(
+                    f"Controller ownership is {environment.controller.state}, "
+                    f"not {required_controller_state}."
+                ),
             )
         )
 
@@ -398,20 +452,26 @@ def evaluate_preflight(
         packet=packet,
         environment=environment,
         packet_readiness=packet_readiness,
+        required_controller_state=required_controller_state,
         blockers=tuple(blockers),
     )
 
 
 def _validate_environment(environment: ExecutionEnvironment) -> None:
-    if type(environment.schema_version) is not int or environment.schema_version != 1:
-        raise PreflightError("schema_version must be the integer 1")
+    if type(environment.schema_version) is not int or environment.schema_version not in {1, 2}:
+        raise PreflightError("schema_version must be the integer 1 or 2")
     _timestamp(environment.generated_at, "generated_at")
     _text(environment.run_id, "run_id")
 
     if not isinstance(environment.controller, ControllerObservation):
         raise PreflightError("controller must be a ControllerObservation")
     _text(environment.controller.id, "controller.id")
-    _choice(environment.controller.state, "controller.state", CONTROLLER_STATES)
+    controller_states = (
+        CONTROLLER_STATES_V1
+        if environment.schema_version == 1
+        else CONTROLLER_STATES
+    )
+    _choice(environment.controller.state, "controller.state", controller_states)
     _text(environment.controller.observed_by, "controller.observed_by")
 
     if not isinstance(environment.workspace, WorkspaceObservation):

@@ -40,7 +40,10 @@ The first executable slice defines and validates:
 - a versioned execution-environment snapshot with observation provenance;
 - deterministic execution preflight over current run, packet, and environment facts;
 - exclusive controller claims with append-only transfer and recovery receipts;
-- plain-language packet, readiness, run, preflight, and controller-ownership views.
+- one canonical mutable publication for each initialized run;
+- immutable activation attempts and worker-ready observations;
+- an atomic, exactly bound `initialized` to `active` handoff commit;
+- plain-language packet, readiness, run, preflight, ownership, and activation views.
 
 Validate or inspect the included example after installing the package:
 
@@ -88,8 +91,9 @@ inspection, examine the named run record first; a complete record may already
 exist even though durable publication or temporary cleanup could not be
 confirmed.
 
-Run-record destinations are explicit and are never overwritten. The factory does
-not yet choose a global run directory or storage backend.
+Run-record destinations are explicit and are never overwritten. The run stays at
+that caller-selected canonical entry. Account-scoped coordination metadata records
+which exact entry owns lifecycle mutation; it is not a second run-state store.
 
 Evaluate collected execution facts without acquiring ownership or starting a
 worker:
@@ -130,11 +134,11 @@ Acquire exclusive controller ownership for an initialized run:
 
 ```sh
 factory run claim acquire \
-  examples/initialized-run/run.json \
+  ./run.json \
   --controller-id controller-1 \
   --recorded-by operator
 
-factory run claim show examples/initialized-run/run.json
+factory run claim show ./run.json
 ```
 
 The CLI uses one coordination namespace at
@@ -175,12 +179,63 @@ age may prompt inspection, but age alone cannot authorize takeover.
 | `3` | Persistence did not complete cleanly; inspect the named claim before retrying. |
 
 A controller claim grants exclusive coordination ownership only. It does not grant
-authority to edit, commit, push, merge, deploy, or start a worker. Guarded worker
-activation remains a separate protocol step. This file-backed implementation
-requires a resolvable POSIX account-database entry and coordinates controllers
-running under that same local operating-system account. It fails closed rather
-than falling back to an environment-selected namespace. Multi-user and distributed
-coordination require a shared supervisor and are not claimed here.
+authority to edit, commit, push, merge, deploy, or start a worker. This file-backed
+implementation requires a resolvable POSIX account-database entry and coordinates
+controllers running under that same local operating-system account. It fails closed
+rather than falling back to an environment-selected namespace. Multi-user and
+distributed coordination require a shared supervisor and are not claimed here.
+
+Guard activation of a claimed initialized run in three durable steps:
+
+```sh
+factory run activation attempt \
+  ./run.json \
+  examples/basic-change/packet.json \
+  ./owned-environment.json \
+  --expected-claim-id CLAIM-CURRENT \
+  --recorded-by controller-1
+
+factory run activation worker-ready \
+  ./run.json ACTIVATION-ID \
+  --expected-claim-id CLAIM-CURRENT \
+  --worker-id WORKER-ID \
+  --workspace-id WORKSPACE-ID \
+  --recorded-by controller-1
+
+factory run activation commit \
+  ./run.json \
+  examples/basic-change/packet.json \
+  ACTIVATION-ID \
+  --expected-claim-id CLAIM-CURRENT
+
+factory run activation show ./run.json ACTIVATION-ID
+```
+
+The activation environment uses schema version `2` and must report the exact
+current controller with state `owned`. Attempt creation re-reads the canonical run,
+claim, packet, and environment, recomputes preflight in owned-controller mode, and
+publishes nothing when blocked. The worker-ready command records the current
+controller's durable observation that an adapter prepared the named worker idle in
+the bound workspace. It does not independently prove readiness or prepare, start,
+or prompt a worker by itself.
+
+Commit checks the same publication, claim, packet, attempt, ready observation, and
+preflight freshness before atomically replacing the canonical run. Copies,
+symbolic links, hard links, renamed entries, substituted initialized bytes, stale
+claims, and mismatched workers or workspaces block. Exact retries reconfirm
+run-record durability; conflicting retries do not overwrite state.
+
+| Exit code | `run activation` meaning |
+|---:|---|
+| `0` | The requested record or exact activation commit is durable, or valid activation state was shown. |
+| `1` | Current valid state blocks the request, or another immutable publication won contention. |
+| `2` | An input or durable record is unreadable, malformed, ambiguous, or inconsistent. |
+| `3` | Publication may be visible but durability is uncertain; inspect before retrying. |
+
+`active` means only that the guarded idle-worker handoff was committed. It is not
+completion, acceptance, merge readiness, or external authority. This slice does
+not launch an ACP session or tell the prepared worker to begin; worker transport is
+the next adapter boundary.
 
 The repository deliberately contains no roadmap or implementation plan. Durable
 architectural decisions live in `adr/`; current behavior lives in code, tests,

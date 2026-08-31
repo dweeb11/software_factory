@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from .activation import ActivationAttempt, WorkerReadyReceipt
 from .controller_claims import ControllerClaimEvent, ControllerClaimHistory
 from .preflight import PreflightReport
 from .readiness import ReadinessReport, evaluate_readiness
+from .run_coordination import RunPublication
 from .runs import RunRecord
 from .work_packets import AUTHORITY_ACTIONS, WorkPacket
 
@@ -122,6 +124,10 @@ def render_run(record: RunRecord) -> str:
         transition_line = f"  {transition.sequence}. {from_state} → {transition.to_state} at {transition.at} by {transition.recorded_by}"
         lines.append(transition_line)
         lines.append(f"     Reason: {reason}")
+        if transition.activation is not None:
+            lines.append(f"     Claim: {transition.activation.claim_id}")
+            lines.append(f"     Activation attempt: {transition.activation.attempt_id}")
+            lines.append(f"     Prepared worker: {transition.activation.worker_id}")
 
     lines.extend(
         [
@@ -134,8 +140,15 @@ def render_run(record: RunRecord) -> str:
     return "\n".join(lines) + "\n"
 
 
-def render_run_initialized(record: RunRecord, path: str) -> str:
-    return f"Run initialized at {path}.\n\n{render_run(record)}"
+def render_run_initialized(
+    record: RunRecord, path: str, publication: RunPublication
+) -> str:
+    return (
+        f"Run initialized at {path}.\n"
+        f"Canonical publication: {publication.id}.\n"
+        f"Coordination is bound to this exact run entry; copies and aliases cannot act "
+        f"for it.\n\n{render_run(record)}"
+    )
 
 
 def render_controller_claim(history: ControllerClaimHistory) -> str:
@@ -145,6 +158,7 @@ def render_controller_claim(history: ControllerClaimHistory) -> str:
         "",
         "Current controller ownership",
         f"  Claim ID: {current.claim_id}",
+        f"  Run publication: {current.publication_id or 'legacy claim — unbound'}",
         f"  Controller: {current.controller_id}",
         f"  Established at: {current.at}",
         f"  Recorded by: {current.recorded_by}",
@@ -207,6 +221,7 @@ def render_preflight(report: PreflightReport) -> str:
         "Collected environment",
         f"  Snapshot generated at: {environment.generated_at}",
         f"  Controller: {environment.controller.id} ({environment.controller.state})",
+        f"  Required controller state: {report.required_controller_state}",
         f"  Controller observed by: {environment.controller.observed_by}",
         f"  Workspace: {environment.workspace.id}",
         f"  Available: {'yes' if environment.workspace.available else 'no'}",
@@ -262,6 +277,119 @@ def render_preflight(report: PreflightReport) -> str:
             "and no worker or external action was started.",
         ]
     )
+    return "\n".join(lines) + "\n"
+
+
+def render_activation_prepared(
+    attempt: ActivationAttempt, report: PreflightReport
+) -> str:
+    lines = [
+        f"Activation attempt {attempt.id} is prepared for {attempt.run_id}.",
+        "",
+        "Exact bindings",
+        f"  Run publication: {attempt.publication_id}",
+        f"  Run state: {attempt.expected_state}",
+        f"  Controller claim: {attempt.claim_id}",
+        f"  Controller: {attempt.controller_id}",
+        f"  Packet: {attempt.packet_id} ({attempt.packet_digest})",
+        f"  Workspace: {attempt.environment.workspace.id}",
+        f"  Environment snapshot: {attempt.environment_digest}",
+        f"  Preflight evaluator: {attempt.preflight_evaluator}",
+        f"  Required controller state: {report.required_controller_state}",
+        f"  Evaluated at: {attempt.preflight_evaluated_at}",
+        "",
+        "Handoff boundary",
+        "  ✓ Current packet, run, claim, environment, and preflight were bound",
+        "    into an immutable activation attempt.",
+        "  No worker-ready observation has been recorded.",
+        "  The run remains initialized; no worker was told to begin.",
+        "  An activation attempt grants no external authority and is not completion.",
+    ]
+    return "\n".join(lines) + "\n"
+
+
+def render_worker_ready_recorded(
+    attempt: ActivationAttempt, receipt: WorkerReadyReceipt
+) -> str:
+    lines = [
+        f"Worker-ready observation {receipt.id} was recorded for {attempt.id}.",
+        "",
+        "Prepared handoff",
+        f"  Run: {receipt.run_id}",
+        f"  Run publication: {receipt.publication_id}",
+        f"  Controller claim: {attempt.claim_id}",
+        f"  Worker: {receipt.worker_id}",
+        f"  Workspace: {receipt.workspace_id}",
+        f"  Recorded by controller: {receipt.recorded_by}",
+        f"  Recorded at: {receipt.recorded_at}",
+        "",
+        "Observation boundary",
+        "  This is the controller's durable record of an adapter-reported idle worker.",
+        "  It is not independent proof, does not grant the worker authority, and did",
+        "  not tell the worker to begin. The run remains initialized until commit.",
+    ]
+    return "\n".join(lines) + "\n"
+
+
+def render_activation_attempt(
+    attempt: ActivationAttempt,
+    receipt: WorkerReadyReceipt | None,
+    run: RunRecord,
+) -> str:
+    lines = [
+        f"Activation attempt {attempt.id} targets {attempt.run_id}.",
+        "",
+        "Attempt",
+        f"  Created at: {attempt.created_at}",
+        f"  Controller claim: {attempt.claim_id}",
+        f"  Controller: {attempt.controller_id}",
+        f"  Workspace: {attempt.environment.workspace.id}",
+        f"  Immutable preflight verdict: {'passed' if attempt.preflight_ready else 'blocked'}",
+        "",
+        "Worker readiness",
+    ]
+    if receipt is None:
+        lines.append("  No worker-ready observation is recorded.")
+    else:
+        lines.extend(
+            [
+                f"  Worker: {receipt.worker_id}",
+                f"  Workspace: {receipt.workspace_id}",
+                f"  Recorded at: {receipt.recorded_at}",
+                f"  Recorded by controller: {receipt.recorded_by}",
+                "  This is a controller-recorded adapter observation, not independent proof.",
+            ]
+        )
+    lines.extend(
+        [
+            "",
+            "Run state",
+            f"  Current state: {run.current_state}",
+            "  Active means the guarded handoff was committed; it does not mean the",
+            "  work is complete and grants no merge, deploy, or other external authority.",
+        ]
+    )
+    return "\n".join(lines) + "\n"
+
+
+def render_activation_committed(record: RunRecord) -> str:
+    activation = record.transitions[-1].activation
+    if activation is None:
+        raise ValueError("committed activation requires an activation binding")
+    lines = [
+        f"Run {record.id} is active from activation attempt {activation.attempt_id}.",
+        "",
+        "Committed handoff",
+        f"  Controller claim: {activation.claim_id}",
+        f"  Worker: {activation.worker_id}",
+        f"  Attempt digest: {activation.attempt_digest}",
+        f"  Worker-ready digest: {activation.worker_ready_digest}",
+        "",
+        "Authority boundary",
+        "  Active records a guarded worker handoff. It is not work completion, proof",
+        "  of acceptance, merge readiness, or authority to perform an external action.",
+        "  This command did not tell the prepared worker to begin.",
+    ]
     return "\n".join(lines) + "\n"
 
 

@@ -23,15 +23,21 @@ from software_factory.controller_claims import (
     ControllerClaimHistory,
     ControllerClaimPersistenceError,
     ControllerClaimPublicationError,
+    acquire_controller_claim,
     controller_claim_path,
     create_controller_claim,
     create_controller_claim_change,
     default_controller_claim_root,
+    load_controller_claim,
     persist_controller_claim_change,
     persist_initial_controller_claim,
     require_claim_for_run,
 )
 from software_factory.presentation import render_controller_claim
+from software_factory.run_coordination import (
+    RunCoordinationConflictError,
+    register_run_publication,
+)
 from software_factory.runs import RunRecord
 
 
@@ -39,6 +45,7 @@ RUN_PATH = PROJECT_ROOT / "examples" / "initialized-run" / "run.json"
 EXAMPLE_CLAIM_PATH = PROJECT_ROOT / "examples" / "controller-claim"
 FIXED_NOW = datetime(2026, 8, 30, 12, 10, 0, tzinfo=timezone.utc)
 LATER = datetime(2026, 8, 30, 12, 20, 0, tzinfo=timezone.utc)
+PUBLICATION_ID = "PUBLICATION-TEST-1"
 
 
 def initialized_run() -> RunRecord:
@@ -51,9 +58,31 @@ def copy_run(directory: str) -> Path:
     return path
 
 
+def register_copy(run_path: Path, coordination_root: Path) -> None:
+    register_run_publication(
+        initialized_run().id,
+        run_path,
+        publication_id=PUBLICATION_ID,
+        recorded_by="operator",
+        now=FIXED_NOW,
+        coordination_root=coordination_root,
+    )
+
+
+def activation_binding() -> dict[str, str]:
+    return {
+        "claim_id": "CLAIM-ACTIVE",
+        "attempt_id": "ACTIVATION-1",
+        "attempt_digest": "sha256:" + "a" * 64,
+        "worker_id": "worker-1",
+        "worker_ready_digest": "sha256:" + "b" * 64,
+    }
+
+
 def initial_history() -> ControllerClaimHistory:
     return create_controller_claim(
         initialized_run(),
+        publication_id=PUBLICATION_ID,
         claim_id="CLAIM-1",
         controller_id="controller-1",
         recorded_by="operator",
@@ -70,6 +99,8 @@ class ControllerClaimRecordTests(unittest.TestCase):
         history = ControllerClaimHistory.from_path(EXAMPLE_CLAIM_PATH)
 
         self.assertEqual(history.run_id, "RUN-PREFLIGHT-1")
+        self.assertEqual(history.current.schema_version, 2)
+        self.assertEqual(history.current.publication_id, "PUBLICATION-EXAMPLE-1")
         self.assertEqual(history.current.claim_id, "CLAIM-EXAMPLE-1")
 
     def test_default_claim_root_does_not_follow_mutable_home_environment(self) -> None:
@@ -110,6 +141,7 @@ class ControllerClaimRecordTests(unittest.TestCase):
                     kind=event.kind,
                     at=event.at,
                     run_id="RUN-OTHER",
+                    publication_id=event.publication_id,
                     claim_id=event.claim_id,
                     controller_id=event.controller_id,
                     previous_claim_id=event.previous_claim_id,
@@ -126,6 +158,8 @@ class ControllerClaimRecordTests(unittest.TestCase):
         history = initial_history()
 
         self.assertEqual(history.run_id, "RUN-PREFLIGHT-1")
+        self.assertEqual(history.current.schema_version, 2)
+        self.assertEqual(history.current.publication_id, PUBLICATION_ID)
         self.assertEqual(history.current.claim_id, "CLAIM-1")
         self.assertEqual(history.current.controller_id, "controller-1")
         self.assertEqual(history.current.kind, "acquired")
@@ -142,8 +176,9 @@ class ControllerClaimRecordTests(unittest.TestCase):
                 "at": "2026-08-30T12:05:00Z",
                 "from": "initialized",
                 "to": "active",
-                "reason": "test-only",
+                "reason": "worker-handoff-committed",
                 "recorded_by": "controller-1",
+                "activation": activation_binding(),
             }
         )
 
@@ -152,6 +187,7 @@ class ControllerClaimRecordTests(unittest.TestCase):
         ):
             create_controller_claim(
                 RunRecord.from_mapping(data),
+                publication_id=PUBLICATION_ID,
                 claim_id="CLAIM-1",
                 controller_id="controller-1",
                 recorded_by="operator",
@@ -186,6 +222,13 @@ class ControllerClaimRecordTests(unittest.TestCase):
         self.assertEqual(recovered.current.claim_id, "CLAIM-3")
         self.assertEqual(recovered.current.controller_id, "controller-3")
         self.assertEqual(recovered.current.previous_claim_id, "CLAIM-2")
+        self.assertEqual(
+            [event.schema_version for event in recovered.events], [2, 2, 2]
+        )
+        self.assertEqual(
+            [event.publication_id for event in recovered.events],
+            [PUBLICATION_ID, PUBLICATION_ID, PUBLICATION_ID],
+        )
         self.assertEqual([event.kind for event in recovered.events], ["acquired", "transferred", "recovered"])
 
     def test_change_requires_exact_current_claim_id(self) -> None:
@@ -238,12 +281,37 @@ class ControllerClaimPersistenceTests(unittest.TestCase):
 
         self.assertEqual(loaded, initial_history())
 
+    def test_changed_initialized_bytes_block_claim_acquisition_after_publication(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            run_path = copy_run(directory)
+            claim_root = Path(directory) / "claims"
+            coordination_root = Path(directory) / "coordination"
+            register_copy(run_path, coordination_root)
+            run_path.write_bytes(run_path.read_bytes() + b"\n")
+
+            with self.assertRaisesRegex(
+                RunCoordinationConflictError,
+                "canonical initialized run bytes no longer match",
+            ):
+                acquire_controller_claim(
+                    run_path,
+                    claim_id="CLAIM-CHANGED-RUN",
+                    controller_id="controller-1",
+                    recorded_by="operator",
+                    now=FIXED_NOW,
+                    claim_root=claim_root,
+                    coordination_root=coordination_root,
+                )
+
+            self.assertFalse(claim_root.exists())
+
     def test_competing_initial_acquisition_cannot_overwrite_claim(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             claim_path = Path(directory) / "controller-claim"
             persist_initial_controller_claim(initial_history(), claim_path)
             contender = create_controller_claim(
                 initialized_run(),
+                publication_id=PUBLICATION_ID,
                 claim_id="CLAIM-CONTENDER",
                 controller_id="controller-2",
                 recorded_by="operator",
@@ -362,7 +430,7 @@ class ControllerClaimPersistenceTests(unittest.TestCase):
             claim_path = Path(directory) / "controller-claim"
             claim_path.mkdir()
             (claim_path / "000000.json").write_text(
-                '{"schema_version": 1, "schema_version": 1}', encoding="utf-8"
+                '{"schema_version": 2, "schema_version": 2}', encoding="utf-8"
             )
 
             with self.assertRaisesRegex(ControllerClaimError, "ambiguous: duplicate JSON member"):
@@ -404,6 +472,8 @@ class ControllerClaimCommandTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             run_path = copy_run(directory)
             claim_root = Path(directory) / "claims"
+            coordination_root = Path(directory) / "coordination"
+            register_copy(run_path, coordination_root)
             claim_path = controller_claim_path(initialized_run().id, claim_root)
             acquired_output = io.StringIO()
             with redirect_stdout(acquired_output):
@@ -420,6 +490,7 @@ class ControllerClaimCommandTests(unittest.TestCase):
                     ],
                     claim_id_factory=lambda: "CLAIM-1",
                     claim_root=claim_root,
+                    coordination_root=coordination_root,
                     clock=lambda: FIXED_NOW,
                 )
 
@@ -442,6 +513,7 @@ class ControllerClaimCommandTests(unittest.TestCase):
                     ],
                     claim_id_factory=lambda: "CLAIM-2",
                     claim_root=claim_root,
+                    coordination_root=coordination_root,
                     clock=lambda: LATER,
                 )
 
@@ -450,6 +522,7 @@ class ControllerClaimCommandTests(unittest.TestCase):
                 shown = main(
                     ["run", "claim", "show", str(run_path)],
                     claim_root=claim_root,
+                    coordination_root=coordination_root,
                 )
 
         self.assertEqual((acquired, recovered, shown), (0, 0, 0))
@@ -458,10 +531,82 @@ class ControllerClaimCommandTests(unittest.TestCase):
         self.assertIn("claimed by controller-2", show_output.getvalue())
         self.assertIn("Replaced claim: CLAIM-1", show_output.getvalue())
 
+    def test_show_and_load_enforce_v2_publication_binding_but_inspect_legacy(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            run_path = copy_run(directory)
+            claim_root = Path(directory) / "claims"
+            coordination_root = Path(directory) / "coordination"
+            register_copy(run_path, coordination_root)
+            claim_path = controller_claim_path(initialized_run().id, claim_root)
+            claim_path.mkdir(parents=True)
+            mismatched = event_data(initial_history())
+            mismatched["publication_id"] = "PUBLICATION-OTHER"
+            (claim_path / "000000.json").write_text(
+                json.dumps(mismatched, indent=2) + "\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                ControllerClaimError,
+                "belongs to publication PUBLICATION-OTHER, not PUBLICATION-TEST-1",
+            ):
+                load_controller_claim(
+                    run_path,
+                    claim_root=claim_root,
+                    coordination_root=coordination_root,
+                )
+
+            mismatch_errors = io.StringIO()
+            with redirect_stderr(mismatch_errors):
+                mismatched_show = main(
+                    ["run", "claim", "show", str(run_path)],
+                    claim_root=claim_root,
+                    coordination_root=coordination_root,
+                )
+
+        with tempfile.TemporaryDirectory() as directory:
+            run_path = copy_run(directory)
+            claim_root = Path(directory) / "claims"
+            coordination_root = Path(directory) / "coordination"
+            register_copy(run_path, coordination_root)
+            claim_path = controller_claim_path(initialized_run().id, claim_root)
+            claim_path.mkdir(parents=True)
+            legacy = event_data(initial_history())
+            legacy["schema_version"] = 1
+            del legacy["publication_id"]
+            (claim_path / "000000.json").write_text(
+                json.dumps(legacy, indent=2) + "\n",
+                encoding="utf-8",
+            )
+
+            loaded = load_controller_claim(
+                run_path,
+                claim_root=claim_root,
+                coordination_root=coordination_root,
+            )
+            legacy_output = io.StringIO()
+            with redirect_stdout(legacy_output):
+                legacy_show = main(
+                    ["run", "claim", "show", str(run_path)],
+                    claim_root=claim_root,
+                    coordination_root=coordination_root,
+                )
+
+        self.assertEqual(mismatched_show, 2)
+        self.assertIn(
+            "belongs to publication PUBLICATION-OTHER, not PUBLICATION-TEST-1",
+            mismatch_errors.getvalue(),
+        )
+        self.assertIsNone(loaded.current.publication_id)
+        self.assertEqual(legacy_show, 0)
+        self.assertIn("claimed by controller-1", legacy_output.getvalue())
+
     def test_competing_acquire_returns_one_without_overwrite(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             run_path = copy_run(directory)
             claim_root = Path(directory) / "claims"
+            coordination_root = Path(directory) / "coordination"
+            register_copy(run_path, coordination_root)
             claim_root.mkdir()
             claim_path = controller_claim_path(initialized_run().id, claim_root)
             persist_initial_controller_claim(initial_history(), claim_path)
@@ -481,6 +626,7 @@ class ControllerClaimCommandTests(unittest.TestCase):
                     ],
                     claim_id_factory=lambda: "CLAIM-2",
                     claim_root=claim_root,
+                    coordination_root=coordination_root,
                     clock=lambda: LATER,
                 )
             loaded = ControllerClaimHistory.from_path(claim_path)
@@ -494,8 +640,9 @@ class ControllerClaimCommandTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             run_path = copy_run(directory)
             alias_path = Path(directory) / "run-alias.json"
-            os.link(run_path, alias_path)
             claim_root = Path(directory) / "claims"
+            coordination_root = Path(directory) / "coordination"
+            register_copy(run_path, coordination_root)
 
             output = io.StringIO()
             with redirect_stdout(output):
@@ -512,8 +659,10 @@ class ControllerClaimCommandTests(unittest.TestCase):
                     ],
                     claim_id_factory=lambda: "CLAIM-1",
                     claim_root=claim_root,
+                    coordination_root=coordination_root,
                     clock=lambda: FIXED_NOW,
                 )
+            os.link(run_path, alias_path)
             errors = io.StringIO()
             with redirect_stderr(errors):
                 contender = main(
@@ -529,17 +678,20 @@ class ControllerClaimCommandTests(unittest.TestCase):
                     ],
                     claim_id_factory=lambda: "CLAIM-2",
                     claim_root=claim_root,
+                    coordination_root=coordination_root,
                     clock=lambda: LATER,
                 )
 
         self.assertEqual(first, 0)
-        self.assertEqual(contender, 1)
-        self.assertIn("already exists", errors.getvalue())
+        self.assertEqual(contender, 2)
+        self.assertIn("exactly one hard link", errors.getvalue())
 
     def test_stale_recovery_returns_one_and_leaves_no_receipt(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             run_path = copy_run(directory)
             claim_root = Path(directory) / "claims"
+            coordination_root = Path(directory) / "coordination"
+            register_copy(run_path, coordination_root)
             claim_root.mkdir()
             claim_path = controller_claim_path(initialized_run().id, claim_root)
             persist_initial_controller_claim(initial_history(), claim_path)
@@ -563,6 +715,7 @@ class ControllerClaimCommandTests(unittest.TestCase):
                     ],
                     claim_id_factory=lambda: "CLAIM-2",
                     claim_root=claim_root,
+                    coordination_root=coordination_root,
                     clock=lambda: LATER,
                 )
             loaded = ControllerClaimHistory.from_path(claim_path)
@@ -577,6 +730,8 @@ class ControllerClaimCommandTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             run_path = copy_run(directory)
             claim_root = Path(directory) / "claims"
+            coordination_root = Path(directory) / "coordination"
+            register_copy(run_path, coordination_root)
             claim_root.mkdir()
             claim_path = controller_claim_path(initialized_run().id, claim_root)
             claim_path.mkdir()
@@ -586,6 +741,7 @@ class ControllerClaimCommandTests(unittest.TestCase):
                 exit_code = main(
                     ["run", "claim", "show", str(run_path)],
                     claim_root=claim_root,
+                    coordination_root=coordination_root,
                 )
 
         self.assertEqual(exit_code, 2)
@@ -596,6 +752,8 @@ class ControllerClaimCommandTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             run_path = copy_run(directory)
             claim_root = Path(directory) / "claims"
+            coordination_root = Path(directory) / "coordination"
+            register_copy(run_path, coordination_root)
             claim_path = controller_claim_path(initialized_run().id, claim_root)
             errors = io.StringIO()
 
@@ -617,6 +775,7 @@ class ControllerClaimCommandTests(unittest.TestCase):
                         ],
                         claim_id_factory=lambda: "CLAIM-1",
                         claim_root=claim_root,
+                        coordination_root=coordination_root,
                         clock=lambda: FIXED_NOW,
                     )
             loaded = ControllerClaimHistory.from_path(claim_path)

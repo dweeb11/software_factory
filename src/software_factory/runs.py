@@ -71,6 +71,15 @@ class ReadinessObservation:
 
 
 @dataclass(frozen=True)
+class ActivationBinding:
+    claim_id: str
+    attempt_id: str
+    attempt_digest: str
+    worker_id: str
+    worker_ready_digest: str
+
+
+@dataclass(frozen=True)
 class RunTransition:
     sequence: int
     at: str
@@ -78,6 +87,7 @@ class RunTransition:
     to_state: str
     reason: str
     recorded_by: str
+    activation: ActivationBinding | None = None
 
 
 @dataclass(frozen=True)
@@ -132,8 +142,8 @@ class RunRecord:
         )
 
         schema_version = data.get("schema_version")
-        if type(schema_version) is not int or schema_version != 1:
-            raise RunError("schema_version must be the integer 1")
+        if type(schema_version) is not int or schema_version not in {1, 2}:
+            raise RunError("schema_version must be the integer 1 or 2")
 
         packet_data = _mapping(data.get("packet"), "packet")
         _require_fields(packet_data, {"id", "digest"}, "packet")
@@ -170,7 +180,7 @@ class RunRecord:
         )
 
         initiated_by = _text(data.get("initiated_by"), "initiated_by")
-        transitions = _transitions(data.get("transitions"))
+        transitions = _transitions(data.get("transitions"), schema_version=schema_version)
         first = transitions[0]
         if first.recorded_by != initiated_by:
             raise RunError("the initial transition must be recorded by initiated_by")
@@ -199,14 +209,7 @@ class RunRecord:
                 "blockers": list(self.readiness.blockers),
             },
             "transitions": [
-                {
-                    "sequence": transition.sequence,
-                    "at": transition.at,
-                    "from": transition.from_state,
-                    "to": transition.to_state,
-                    "reason": transition.reason,
-                    "recorded_by": transition.recorded_by,
-                }
+                _transition_mapping(transition, schema_version=self.schema_version)
                 for transition in self.transitions
             ],
         }
@@ -238,7 +241,7 @@ def initialize_run(
     timestamp = _format_utc(now)
     actor = _text(initiated_by, "initiated_by")
     record = RunRecord(
-        schema_version=1,
+        schema_version=2,
         id=_text(run_id, "run_id"),
         packet=PacketBinding(
             id=packet.id,
@@ -259,6 +262,7 @@ def initialize_run(
                 to_state="initialized",
                 reason="packet-ready",
                 recorded_by=actor,
+                activation=None,
             ),
         ),
     )
@@ -271,7 +275,7 @@ def persist_run(record: RunRecord, path: str | Path) -> None:
     if not parent.is_dir():
         raise RunPersistenceError(f"run directory does not exist: {parent}")
 
-    content = (json.dumps(record.to_mapping(), indent=2) + "\n").encode("utf-8")
+    content = serialize_run(record)
     temporary_path: Path | None = None
     try:
         with tempfile.NamedTemporaryFile(
@@ -357,7 +361,38 @@ def _fsync_directory(path: Path) -> None:
         os.close(descriptor)
 
 
-def _transitions(value: object) -> tuple[RunTransition, ...]:
+def serialize_run(record: RunRecord) -> bytes:
+    validated = RunRecord.from_mapping(record.to_mapping())
+    return (json.dumps(validated.to_mapping(), indent=2) + "\n").encode("utf-8")
+
+
+def _transition_mapping(
+    transition: RunTransition, *, schema_version: int
+) -> dict[str, object]:
+    result: dict[str, object] = {
+        "sequence": transition.sequence,
+        "at": transition.at,
+        "from": transition.from_state,
+        "to": transition.to_state,
+        "reason": transition.reason,
+        "recorded_by": transition.recorded_by,
+    }
+    if schema_version >= 2:
+        result["activation"] = (
+            {
+                "claim_id": transition.activation.claim_id,
+                "attempt_id": transition.activation.attempt_id,
+                "attempt_digest": transition.activation.attempt_digest,
+                "worker_id": transition.activation.worker_id,
+                "worker_ready_digest": transition.activation.worker_ready_digest,
+            }
+            if transition.activation is not None
+            else None
+        )
+    return result
+
+
+def _transitions(value: object, *, schema_version: int) -> tuple[RunTransition, ...]:
     if not isinstance(value, list) or not value:
         raise RunError("transitions must be a non-empty list")
 
@@ -366,11 +401,10 @@ def _transitions(value: object) -> tuple[RunTransition, ...]:
     for index, item in enumerate(cast(list[object], value)):
         field = f"transitions[{index}]"
         data = _mapping(item, field)
-        _require_fields(
-            data,
-            {"sequence", "at", "from", "to", "reason", "recorded_by"},
-            field,
-        )
+        expected_fields = {"sequence", "at", "from", "to", "reason", "recorded_by"}
+        if schema_version >= 2:
+            expected_fields.add("activation")
+        _require_fields(data, expected_fields, field)
         sequence = data.get("sequence")
         if type(sequence) is not int or sequence != index:
             raise RunError(f"{field}.sequence must be the integer {index}")
@@ -386,6 +420,11 @@ def _transitions(value: object) -> tuple[RunTransition, ...]:
         if to_state not in RUN_STATES:
             raise RunError(f"{field}.to is not a known run state: {to_state}")
 
+        activation = (
+            _activation_binding(data.get("activation"), field)
+            if schema_version >= 2 and data.get("activation") is not None
+            else None
+        )
         transition = RunTransition(
             sequence=sequence,
             at=_timestamp(data.get("at"), f"{field}.at"),
@@ -393,11 +432,14 @@ def _transitions(value: object) -> tuple[RunTransition, ...]:
             to_state=to_state,
             reason=_text(data.get("reason"), f"{field}.reason"),
             recorded_by=_text(data.get("recorded_by"), f"{field}.recorded_by"),
+            activation=activation,
         )
 
         if previous is None:
             if transition.from_state is not None or transition.to_state != "initialized":
                 raise RunError("the initial transition must be null -> initialized")
+            if transition.activation is not None:
+                raise RunError("the initial transition cannot contain an activation binding")
         else:
             if previous.to_state in TERMINAL_RUN_STATES:
                 raise RunError(f"no transition may follow terminal state {previous.to_state}")
@@ -411,11 +453,58 @@ def _transitions(value: object) -> tuple[RunTransition, ...]:
                 )
             if transition.at < previous.at:
                 raise RunError(f"{field}.at cannot predate the prior transition")
+            if previous.to_state == "initialized" and transition.to_state == "active":
+                if schema_version >= 2:
+                    if transition.activation is None:
+                        raise RunError(
+                            "version 2 initialized -> active requires an activation binding"
+                        )
+                    if transition.reason != "worker-handoff-committed":
+                        raise RunError(
+                            "initialized -> active reason must be worker-handoff-committed"
+                        )
+            elif transition.activation is not None:
+                raise RunError(
+                    f"{field}.activation is allowed only for initialized -> active"
+                )
 
         transitions.append(transition)
         previous = transition
 
     return tuple(transitions)
+
+
+def _activation_binding(value: object, transition_field: str) -> ActivationBinding:
+    field = f"{transition_field}.activation"
+    data = _mapping(value, field)
+    _require_fields(
+        data,
+        {
+            "claim_id",
+            "attempt_id",
+            "attempt_digest",
+            "worker_id",
+            "worker_ready_digest",
+        },
+        field,
+    )
+    attempt_digest = _text(data.get("attempt_digest"), f"{field}.attempt_digest")
+    worker_ready_digest = _text(
+        data.get("worker_ready_digest"), f"{field}.worker_ready_digest"
+    )
+    if not _DIGEST_PATTERN.fullmatch(attempt_digest):
+        raise RunError(f"{field}.attempt_digest must be a lowercase SHA-256 digest")
+    if not _DIGEST_PATTERN.fullmatch(worker_ready_digest):
+        raise RunError(
+            f"{field}.worker_ready_digest must be a lowercase SHA-256 digest"
+        )
+    return ActivationBinding(
+        claim_id=_text(data.get("claim_id"), f"{field}.claim_id"),
+        attempt_id=_text(data.get("attempt_id"), f"{field}.attempt_id"),
+        attempt_digest=attempt_digest,
+        worker_id=_text(data.get("worker_id"), f"{field}.worker_id"),
+        worker_ready_digest=worker_ready_digest,
+    )
 
 
 def _mapping(value: object, field: str) -> dict[str, object]:

@@ -32,6 +32,7 @@ READY_PATH = PROJECT_ROOT / "examples" / "basic-change" / "packet.json"
 BLOCKED_PATH = PROJECT_ROOT / "examples" / "blocked-change" / "packet.json"
 FIXED_NOW = datetime(2026, 8, 30, 12, 34, 56, tzinfo=timezone.utc)
 FIXED_RUN_ID = "RUN-TEST-1"
+FIXED_PUBLICATION_ID = "PUBLICATION-TEST-1"
 
 
 def initialized_record() -> RunRecord:
@@ -51,6 +52,16 @@ def run_data() -> dict[str, Any]:
     return copy.deepcopy(initialized_record().to_mapping())
 
 
+def activation_binding() -> dict[str, str]:
+    return {
+        "claim_id": "CLAIM-1",
+        "attempt_id": "ACTIVATION-1",
+        "attempt_digest": "sha256:" + "a" * 64,
+        "worker_id": "worker-1",
+        "worker_ready_digest": "sha256:" + "b" * 64,
+    }
+
+
 class RunInitializationTests(unittest.TestCase):
     def test_ready_packet_initializes_a_run_bound_to_exact_bytes(self) -> None:
         packet_content = READY_PATH.read_bytes()
@@ -67,6 +78,7 @@ class RunInitializationTests(unittest.TestCase):
         record = result.record
         if record is None:
             self.fail("initialized result did not contain a record")
+        self.assertEqual(record.schema_version, 2)
         self.assertEqual(record.id, FIXED_RUN_ID)
         self.assertEqual(record.packet.id, "EXAMPLE-1")
         self.assertEqual(
@@ -87,6 +99,9 @@ class RunInitializationTests(unittest.TestCase):
         self.assertEqual(transition.to_state, "initialized")
         self.assertEqual(transition.reason, "packet-ready")
         self.assertEqual(transition.recorded_by, "test-operator")
+        self.assertIsNone(transition.activation)
+        mapping: Any = initialized_record().to_mapping()
+        self.assertIsNone(mapping["transitions"][0]["activation"])
 
     def test_blocked_packet_does_not_produce_a_run_record(self) -> None:
         result = initialize_run(
@@ -150,8 +165,9 @@ class RunRecordTests(unittest.TestCase):
                 "at": "2026-08-30T12:35:00Z",
                 "from": "initialized",
                 "to": "active",
-                "reason": "preflight-passed",
+                "reason": "worker-handoff-committed",
                 "recorded_by": "controller-1",
+                "activation": activation_binding(),
             }
         )
 
@@ -159,6 +175,74 @@ class RunRecordTests(unittest.TestCase):
 
         self.assertEqual(record.current_state, "active")
         self.assertFalse(record.terminal)
+
+    def test_legacy_version_one_initialized_run_remains_valid(self) -> None:
+        data = run_data()
+        data["schema_version"] = 1
+        for transition in data["transitions"]:
+            del transition["activation"]
+
+        record = RunRecord.from_mapping(data)
+
+        self.assertEqual(record.schema_version, 1)
+        mapping: Any = record.to_mapping()
+        self.assertNotIn("activation", mapping["transitions"][0])
+
+    def test_legacy_version_one_active_and_later_lifecycle_history_remains_readable(self) -> None:
+        data = run_data()
+        data["schema_version"] = 1
+        for transition in data["transitions"]:
+            del transition["activation"]
+        data["transitions"].extend(
+            [
+                {
+                    "sequence": 1,
+                    "at": "2026-08-30T12:35:00Z",
+                    "from": "initialized",
+                    "to": "active",
+                    "reason": "execution-started",
+                    "recorded_by": "controller-1",
+                },
+                {
+                    "sequence": 2,
+                    "at": "2026-08-30T12:36:00Z",
+                    "from": "active",
+                    "to": "waiting",
+                    "reason": "awaiting-worker",
+                    "recorded_by": "controller-1",
+                },
+                {
+                    "sequence": 3,
+                    "at": "2026-08-30T12:37:00Z",
+                    "from": "waiting",
+                    "to": "active",
+                    "reason": "worker-resumed",
+                    "recorded_by": "controller-1",
+                },
+                {
+                    "sequence": 4,
+                    "at": "2026-08-30T12:38:00Z",
+                    "from": "active",
+                    "to": "complete",
+                    "reason": "work-completed",
+                    "recorded_by": "controller-1",
+                },
+            ]
+        )
+
+        record = RunRecord.from_mapping(data)
+
+        self.assertEqual(record.schema_version, 1)
+        self.assertEqual(record.current_state, "complete")
+        self.assertTrue(record.terminal)
+        self.assertEqual(
+            [transition.to_state for transition in record.transitions],
+            ["initialized", "active", "waiting", "active", "complete"],
+        )
+        mapping: Any = record.to_mapping()
+        self.assertTrue(
+            all("activation" not in transition for transition in mapping["transitions"])
+        )
 
     def test_transition_from_must_match_prior_state(self) -> None:
         data = run_data()
@@ -170,6 +254,7 @@ class RunRecordTests(unittest.TestCase):
                 "to": "active",
                 "reason": "resumed",
                 "recorded_by": "controller-1",
+                "activation": activation_binding(),
             }
         )
 
@@ -194,6 +279,7 @@ class RunRecordTests(unittest.TestCase):
                     "to": "blocked",
                     "reason": "preflight-blocked",
                     "recorded_by": "controller-1",
+                    "activation": None,
                 },
                 {
                     "sequence": 2,
@@ -202,6 +288,7 @@ class RunRecordTests(unittest.TestCase):
                     "to": "active",
                     "reason": "unsafe-resume",
                     "recorded_by": "controller-1",
+                    "activation": None,
                 },
             ]
         )
@@ -318,6 +405,7 @@ class RunCommandTests(unittest.TestCase):
     def test_init_creates_and_explains_a_deterministic_run(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             run_path = Path(directory) / "run.json"
+            coordination_root = Path(directory) / "coordination"
             output = io.StringIO()
 
             with redirect_stdout(output):
@@ -331,6 +419,8 @@ class RunCommandTests(unittest.TestCase):
                         "test-operator",
                     ],
                     run_id_factory=lambda: FIXED_RUN_ID,
+                    publication_id_factory=lambda: FIXED_PUBLICATION_ID,
+                    coordination_root=coordination_root,
                     clock=lambda: FIXED_NOW,
                 )
 
@@ -345,6 +435,7 @@ class RunCommandTests(unittest.TestCase):
     def test_blocked_packet_returns_one_and_creates_no_record(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             run_path = Path(directory) / "run.json"
+            coordination_root = Path(directory) / "coordination"
             output = io.StringIO()
 
             with redirect_stdout(output):
@@ -356,7 +447,9 @@ class RunCommandTests(unittest.TestCase):
                         str(run_path),
                         "--initiated-by",
                         "test-operator",
-                    ]
+                    ],
+                    publication_id_factory=lambda: FIXED_PUBLICATION_ID,
+                    coordination_root=coordination_root,
                 )
 
             exists = run_path.exists()
@@ -370,6 +463,7 @@ class RunCommandTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             packet_path = Path(directory) / "packet.json"
             run_path = Path(directory) / "run.json"
+            coordination_root = Path(directory) / "coordination"
             packet_path.write_text("{}", encoding="utf-8")
             errors = io.StringIO()
 
@@ -382,7 +476,9 @@ class RunCommandTests(unittest.TestCase):
                         str(run_path),
                         "--initiated-by",
                         "test-operator",
-                    ]
+                    ],
+                    publication_id_factory=lambda: FIXED_PUBLICATION_ID,
+                    coordination_root=coordination_root,
                 )
 
             exists = run_path.exists()
@@ -394,6 +490,7 @@ class RunCommandTests(unittest.TestCase):
     def test_existing_destination_returns_three_without_overwrite(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             run_path = Path(directory) / "run.json"
+            coordination_root = Path(directory) / "coordination"
             run_path.write_text("existing state\n", encoding="utf-8")
             errors = io.StringIO()
 
@@ -406,7 +503,9 @@ class RunCommandTests(unittest.TestCase):
                         str(run_path),
                         "--initiated-by",
                         "test-operator",
-                    ]
+                    ],
+                    publication_id_factory=lambda: FIXED_PUBLICATION_ID,
+                    coordination_root=coordination_root,
                 )
 
             existing = run_path.read_text(encoding="utf-8")
@@ -419,6 +518,7 @@ class RunCommandTests(unittest.TestCase):
     def test_directory_sync_failure_reports_indeterminate_publication(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             run_path = Path(directory) / "run.json"
+            coordination_root = Path(directory) / "coordination"
             errors = io.StringIO()
 
             with patch(
@@ -436,6 +536,8 @@ class RunCommandTests(unittest.TestCase):
                             "test-operator",
                         ],
                         run_id_factory=lambda: FIXED_RUN_ID,
+                        publication_id_factory=lambda: FIXED_PUBLICATION_ID,
+                        coordination_root=coordination_root,
                         clock=lambda: FIXED_NOW,
                     )
 

@@ -66,6 +66,16 @@ def initialized_run() -> RunRecord:
     return RunRecord.from_path(RUN_PATH)
 
 
+def activation_binding() -> dict[str, str]:
+    return {
+        "claim_id": "CLAIM-1",
+        "attempt_id": "ACTIVATION-1",
+        "attempt_digest": "sha256:" + "a" * 64,
+        "worker_id": "worker-1",
+        "worker_ready_digest": "sha256:" + "b" * 64,
+    }
+
+
 class ExecutionEnvironmentTests(unittest.TestCase):
     def test_ready_example_is_well_formed(self) -> None:
         environment = ready_environment()
@@ -73,6 +83,23 @@ class ExecutionEnvironmentTests(unittest.TestCase):
         self.assertEqual(environment.run_id, "RUN-PREFLIGHT-1")
         self.assertEqual(environment.controller.state, "available")
         self.assertEqual(environment.requested_actions, frozenset({"edit"}))
+
+    def test_owned_controller_state_requires_environment_schema_version_two(self) -> None:
+        data = load_mapping(READY_ENVIRONMENT_PATH)
+        mapping_field(data, "controller")["state"] = "owned"
+
+        data["schema_version"] = 1
+        with self.assertRaisesRegex(
+            PreflightError,
+            "controller.state must be one of: available, contended, unknown",
+        ):
+            ExecutionEnvironment.from_mapping(data)
+
+        data["schema_version"] = 2
+        environment = ExecutionEnvironment.from_mapping(data)
+
+        self.assertEqual(environment.schema_version, 2)
+        self.assertEqual(environment.controller.state, "owned")
 
     def test_unknown_controller_state_is_malformed(self) -> None:
         data = load_mapping(READY_ENVIRONMENT_PATH)
@@ -270,8 +297,9 @@ class PreflightEvaluationTests(unittest.TestCase):
                 "at": "2026-08-30T12:01:00Z",
                 "from": "initialized",
                 "to": "active",
-                "reason": "test-only",
+                "reason": "worker-handoff-committed",
                 "recorded_by": "controller-1",
+                "activation": activation_binding(),
             }
         )
 

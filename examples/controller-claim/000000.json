@@ -1,9 +1,10 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "sequence": 0,
   "kind": "acquired",
   "at": "2026-08-30T12:06:00Z",
   "run_id": "RUN-PREFLIGHT-1",
+  "publication_id": "PUBLICATION-EXAMPLE-1",
   "claim_id": "CLAIM-EXAMPLE-1",
   "controller_id": "controller-1",
   "previous_claim_id": null,

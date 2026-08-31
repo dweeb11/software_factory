@@ -7,23 +7,30 @@ from collections.abc import Callable, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 
+from .activation import (
+    ActivationConflictError,
+    ActivationError,
+    ActivationAttempt,
+    commit_activation,
+    inspect_activation,
+    prepare_activation_attempt,
+    record_worker_ready,
+)
 from .controller_claims import (
     ControllerClaimConflictError,
     ControllerClaimError,
-    ControllerClaimHistory,
     ControllerClaimPersistenceError,
     ControllerClaimPublicationError,
-    controller_claim_path,
-    create_controller_claim,
-    create_controller_claim_change,
+    acquire_controller_claim,
+    change_controller_claim,
     default_controller_claim_root,
-    ensure_controller_claim_root,
-    persist_controller_claim_change,
-    persist_initial_controller_claim,
-    require_claim_for_run,
+    load_controller_claim,
 )
 from .preflight import ExecutionEnvironment, PreflightError, evaluate_preflight
 from .presentation import (
+    render_activation_attempt,
+    render_activation_committed,
+    render_activation_prepared,
     render_controller_claim,
     render_controller_claim_acquired,
     render_controller_claim_changed,
@@ -32,8 +39,18 @@ from .presentation import (
     render_run,
     render_run_initialized,
     render_work_packet,
+    render_worker_ready_recorded,
 )
 from .readiness import evaluate_readiness
+from .run_coordination import (
+    RunCoordinationConflictError,
+    RunCoordinationError,
+    RunCoordinationPersistenceError,
+    RunCoordinationPublicationError,
+    activation_attempt_path,
+    default_run_coordination_root,
+    register_run_publication,
+)
 from .runs import (
     RunError,
     RunPersistenceError,
@@ -140,6 +157,51 @@ def build_parser() -> argparse.ArgumentParser:
         change.add_argument(
             "--recorded-by", required=True, help="Identity recording the ownership change."
         )
+
+    activation = run_commands.add_parser(
+        "activation", help="Prepare and inspect guarded worker handoff records."
+    )
+    activation_commands = activation.add_subparsers(
+        dest="activation_command", required=True
+    )
+    activation_attempt = activation_commands.add_parser(
+        "attempt",
+        help="Recompute owned preflight and record an immutable activation attempt.",
+    )
+    activation_attempt.add_argument("run_path", help="Path to the canonical run record.")
+    activation_attempt.add_argument("packet_path", help="Path to the exact work packet.")
+    activation_attempt.add_argument(
+        "environment_path", help="Path to an owned-controller environment snapshot."
+    )
+    activation_attempt.add_argument("--expected-claim-id", required=True)
+    activation_attempt.add_argument("--recorded-by", required=True)
+    activation_attempt.add_argument("--max-age-seconds", type=int, default=300)
+
+    activation_ready = activation_commands.add_parser(
+        "worker-ready",
+        help="Record a controller-observed prepared idle worker without starting it.",
+    )
+    activation_ready.add_argument("run_path", help="Path to the canonical run record.")
+    activation_ready.add_argument("attempt_id", help="Activation attempt identity.")
+    activation_ready.add_argument("--expected-claim-id", required=True)
+    activation_ready.add_argument("--worker-id", required=True)
+    activation_ready.add_argument("--workspace-id", required=True)
+    activation_ready.add_argument("--recorded-by", required=True)
+
+    activation_commit = activation_commands.add_parser(
+        "commit",
+        help="Commit initialized to active for an exact prepared worker handoff.",
+    )
+    activation_commit.add_argument("run_path", help="Path to the canonical run record.")
+    activation_commit.add_argument("packet_path", help="Path to the exact work packet.")
+    activation_commit.add_argument("attempt_id", help="Activation attempt identity.")
+    activation_commit.add_argument("--expected-claim-id", required=True)
+
+    activation_show = activation_commands.add_parser(
+        "show", help="Explain an activation attempt and worker-ready receipt."
+    )
+    activation_show.add_argument("run_path", help="Path to the canonical run record.")
+    activation_show.add_argument("attempt_id", help="Activation attempt identity.")
     return parser
 
 
@@ -147,8 +209,12 @@ def main(
     argv: Sequence[str] | None = None,
     *,
     run_id_factory: Callable[[], str] | None = None,
+    publication_id_factory: Callable[[], str] | None = None,
     claim_id_factory: Callable[[], str] | None = None,
+    attempt_id_factory: Callable[[], str] | None = None,
+    receipt_id_factory: Callable[[], str] | None = None,
     claim_root: str | Path | None = None,
+    coordination_root: str | Path | None = None,
     clock: Callable[[], datetime] | None = None,
 ) -> int:
     args = build_parser().parse_args(argv)
@@ -158,8 +224,14 @@ def main(
         return _handle_run(
             args,
             run_id_factory=run_id_factory or _new_run_id,
+            publication_id_factory=publication_id_factory or _new_publication_id,
             claim_id_factory=claim_id_factory or _new_claim_id,
+            attempt_id_factory=attempt_id_factory or _new_attempt_id,
+            receipt_id_factory=receipt_id_factory or _new_receipt_id,
             claim_root=Path(claim_root) if claim_root is not None else None,
+            coordination_root=(
+                Path(coordination_root) if coordination_root is not None else None
+            ),
             clock=clock or _utc_now,
         )
     raise AssertionError(f"unhandled command: {args.command}")
@@ -190,8 +262,12 @@ def _handle_run(
     args: argparse.Namespace,
     *,
     run_id_factory: Callable[[], str],
+    publication_id_factory: Callable[[], str],
     claim_id_factory: Callable[[], str],
+    attempt_id_factory: Callable[[], str],
+    receipt_id_factory: Callable[[], str],
     claim_root: Path | None,
+    coordination_root: Path | None,
     clock: Callable[[], datetime],
 ) -> int:
     if args.run_command == "claim":
@@ -199,6 +275,17 @@ def _handle_run(
             args,
             claim_id_factory=claim_id_factory,
             claim_root=claim_root,
+            coordination_root=coordination_root,
+            clock=clock,
+        )
+
+    if args.run_command == "activation":
+        return _handle_activation(
+            args,
+            attempt_id_factory=attempt_id_factory,
+            receipt_id_factory=receipt_id_factory,
+            claim_root=claim_root,
+            coordination_root=coordination_root,
             clock=clock,
         )
 
@@ -243,11 +330,12 @@ def _handle_run(
             return 2
 
         try:
+            initialized_at = clock()
             initialization = initialize_run(
                 packet_content,
                 run_id=run_id_factory(),
                 initiated_by=args.initiated_by,
-                now=clock(),
+                now=initialized_at,
                 source=f"packet {packet_path}",
             )
         except (PacketError, RunError) as error:
@@ -270,7 +358,33 @@ def _handle_run(
             print(f"Not initialized: {error}", file=sys.stderr)
             return 3
 
-        print(render_run_initialized(record, args.run_path), end="")
+        try:
+            resolved_coordination_root = (
+                coordination_root
+                if coordination_root is not None
+                else default_run_coordination_root()
+            )
+            publication = register_run_publication(
+                record.id,
+                args.run_path,
+                publication_id=publication_id_factory(),
+                recorded_by=args.initiated_by,
+                now=initialized_at,
+                coordination_root=resolved_coordination_root,
+            )
+        except (
+            RunCoordinationError,
+            RunCoordinationPersistenceError,
+            RunCoordinationPublicationError,
+        ) as error:
+            print(
+                f"Initialization requires inspection: run exists but its canonical "
+                f"publication was not registered cleanly: {error}",
+                file=sys.stderr,
+            )
+            return 3
+
+        print(render_run_initialized(record, args.run_path, publication), end="")
         return 0
 
     raise AssertionError(f"unhandled run command: {args.run_command}")
@@ -281,6 +395,7 @@ def _handle_controller_claim(
     *,
     claim_id_factory: Callable[[], str],
     claim_root: Path | None,
+    coordination_root: Path | None,
     clock: Callable[[], datetime],
 ) -> int:
     try:
@@ -290,15 +405,29 @@ def _handle_controller_claim(
     except ControllerClaimPersistenceError as error:
         print(f"Blocked: {error}", file=sys.stderr)
         return 2
+    try:
+        resolved_coordination_root = (
+            coordination_root
+            if coordination_root is not None
+            else default_run_coordination_root()
+        )
+    except RunCoordinationPersistenceError as error:
+        print(f"Blocked: {error}", file=sys.stderr)
+        return 2
 
     if args.claim_command == "show":
         try:
-            run = RunRecord.from_path(args.run_path)
-            claim_path = controller_claim_path(run.id, resolved_claim_root)
-            history = require_claim_for_run(
-                run, ControllerClaimHistory.from_path(claim_path)
+            history = load_controller_claim(
+                args.run_path,
+                claim_root=resolved_claim_root,
+                coordination_root=resolved_coordination_root,
             )
-        except (ControllerClaimError, RunError) as error:
+        except (
+            ControllerClaimError,
+            RunCoordinationError,
+            RunCoordinationPersistenceError,
+            RunError,
+        ) as error:
             print(f"Blocked: {error}", file=sys.stderr)
             return 2
         print(render_controller_claim(history), end="")
@@ -306,27 +435,31 @@ def _handle_controller_claim(
 
     if args.claim_command == "acquire":
         try:
-            run = RunRecord.from_path(args.run_path)
-            history = create_controller_claim(
-                run,
+            history, claim_path = acquire_controller_claim(
+                args.run_path,
                 claim_id=claim_id_factory(),
                 controller_id=args.controller_id,
                 recorded_by=args.recorded_by,
                 now=clock(),
+                claim_root=resolved_claim_root,
+                coordination_root=resolved_coordination_root,
             )
-            root = ensure_controller_claim_root(resolved_claim_root)
-            claim_path = controller_claim_path(run.id, root)
-            persist_initial_controller_claim(history, claim_path)
         except ControllerClaimConflictError as error:
             print(f"Not acquired: {error}", file=sys.stderr)
             return 1
-        except (ControllerClaimError, RunError) as error:
+        except (ControllerClaimError, RunCoordinationError, RunError) as error:
             print(f"Blocked: {error}", file=sys.stderr)
             return 2
-        except ControllerClaimPublicationError as error:
+        except (
+            ControllerClaimPublicationError,
+            RunCoordinationPublicationError,
+        ) as error:
             print(f"Acquisition requires inspection: {error}", file=sys.stderr)
             return 3
-        except ControllerClaimPersistenceError as error:
+        except (
+            ControllerClaimPersistenceError,
+            RunCoordinationPersistenceError,
+        ) as error:
             print(f"Not acquired: {error}", file=sys.stderr)
             return 3
         print(render_controller_claim_acquired(history, str(claim_path)), end="")
@@ -335,13 +468,8 @@ def _handle_controller_claim(
     if args.claim_command in {"transfer", "recover"}:
         kind = "transferred" if args.claim_command == "transfer" else "recovered"
         try:
-            run = RunRecord.from_path(args.run_path)
-            claim_path = controller_claim_path(run.id, resolved_claim_root)
-            prior = require_claim_for_run(
-                run, ControllerClaimHistory.from_path(claim_path)
-            )
-            event = create_controller_claim_change(
-                prior,
+            event, history, claim_path = change_controller_claim(
+                args.run_path,
                 kind=kind,
                 expected_claim_id=args.expected_claim_id,
                 claim_id=claim_id_factory(),
@@ -349,8 +477,9 @@ def _handle_controller_claim(
                 reason=args.reason,
                 recorded_by=args.recorded_by,
                 now=clock(),
+                claim_root=resolved_claim_root,
+                coordination_root=resolved_coordination_root,
             )
-            history = persist_controller_claim_change(event, claim_path)
         except ControllerClaimConflictError as error:
             print(
                 f"Requested ownership change was not published: {error}. "
@@ -358,13 +487,19 @@ def _handle_controller_claim(
                 file=sys.stderr,
             )
             return 1
-        except (ControllerClaimError, RunError) as error:
+        except (ControllerClaimError, RunCoordinationError, RunError) as error:
             print(f"Blocked: {error}", file=sys.stderr)
             return 2
-        except ControllerClaimPublicationError as error:
+        except (
+            ControllerClaimPublicationError,
+            RunCoordinationPublicationError,
+        ) as error:
             print(f"Ownership change requires inspection: {error}", file=sys.stderr)
             return 3
-        except ControllerClaimPersistenceError as error:
+        except (
+            ControllerClaimPersistenceError,
+            RunCoordinationPersistenceError,
+        ) as error:
             print(
                 f"Requested ownership change was not published: {error}",
                 file=sys.stderr,
@@ -379,12 +514,196 @@ def _handle_controller_claim(
     raise AssertionError(f"unhandled claim command: {args.claim_command}")
 
 
+def _handle_activation(
+    args: argparse.Namespace,
+    *,
+    attempt_id_factory: Callable[[], str],
+    receipt_id_factory: Callable[[], str],
+    claim_root: Path | None,
+    coordination_root: Path | None,
+    clock: Callable[[], datetime],
+) -> int:
+    try:
+        resolved_claim_root = (
+            claim_root if claim_root is not None else default_controller_claim_root()
+        )
+        resolved_coordination_root = (
+            coordination_root
+            if coordination_root is not None
+            else default_run_coordination_root()
+        )
+    except (ControllerClaimPersistenceError, RunCoordinationPersistenceError) as error:
+        print(f"Blocked: {error}", file=sys.stderr)
+        return 2
+
+    if args.activation_command == "attempt":
+        packet_path = Path(args.packet_path)
+        environment_path = Path(args.environment_path)
+        try:
+            packet_content = packet_path.read_bytes()
+            environment_content = environment_path.read_bytes()
+        except OSError as error:
+            print(f"Blocked: cannot read activation input: {error}", file=sys.stderr)
+            return 2
+        try:
+            preparation = prepare_activation_attempt(
+                args.run_path,
+                packet_content,
+                environment_content,
+                expected_claim_id=args.expected_claim_id,
+                attempt_id=attempt_id_factory(),
+                recorded_by=args.recorded_by,
+                now=clock(),
+                max_age_seconds=args.max_age_seconds,
+                claim_root=resolved_claim_root,
+                coordination_root=resolved_coordination_root,
+            )
+        except (ActivationConflictError, RunCoordinationConflictError) as error:
+            print(f"Activation attempt was not recorded: {error}", file=sys.stderr)
+            return 1
+        except RunCoordinationPublicationError as error:
+            print(f"Activation attempt requires inspection: {error}", file=sys.stderr)
+            return 3
+        except RunCoordinationPersistenceError as error:
+            print(f"Activation attempt was not recorded: {error}", file=sys.stderr)
+            return 3
+        except (
+            ActivationError,
+            ControllerClaimError,
+            PacketError,
+            PreflightError,
+            RunCoordinationError,
+            RunError,
+        ) as error:
+            print(f"Blocked: {error}", file=sys.stderr)
+            return 2
+
+        if not preparation.prepared:
+            print(render_preflight(preparation.preflight), end="")
+            return 1
+        attempt = preparation.attempt
+        if attempt is None:
+            raise AssertionError("prepared activation must contain an attempt")
+        print(render_activation_prepared(attempt, preparation.preflight), end="")
+        return 0
+
+    if args.activation_command == "worker-ready":
+        try:
+            receipt = record_worker_ready(
+                args.run_path,
+                attempt_id=args.attempt_id,
+                expected_claim_id=args.expected_claim_id,
+                receipt_id=receipt_id_factory(),
+                worker_id=args.worker_id,
+                workspace_id=args.workspace_id,
+                recorded_by=args.recorded_by,
+                now=clock(),
+                claim_root=resolved_claim_root,
+                coordination_root=resolved_coordination_root,
+            )
+            attempt = ActivationAttempt.from_path(
+                activation_attempt_path(
+                    receipt.run_id, receipt.attempt_id, resolved_coordination_root
+                )
+            )
+        except (ActivationConflictError, RunCoordinationConflictError) as error:
+            print(f"Worker-ready observation was not recorded: {error}", file=sys.stderr)
+            return 1
+        except RunCoordinationPublicationError as error:
+            print(f"Worker-ready observation requires inspection: {error}", file=sys.stderr)
+            return 3
+        except RunCoordinationPersistenceError as error:
+            print(f"Worker-ready observation was not recorded: {error}", file=sys.stderr)
+            return 3
+        except (
+            ActivationError,
+            ControllerClaimError,
+            RunCoordinationError,
+            RunError,
+        ) as error:
+            print(f"Blocked: {error}", file=sys.stderr)
+            return 2
+        print(render_worker_ready_recorded(attempt, receipt), end="")
+        return 0
+
+    if args.activation_command == "commit":
+        packet_path = Path(args.packet_path)
+        try:
+            packet_content = packet_path.read_bytes()
+        except OSError as error:
+            print(f"Blocked: cannot read packet {packet_path}: {error}", file=sys.stderr)
+            return 2
+        try:
+            record = commit_activation(
+                args.run_path,
+                packet_content,
+                attempt_id=args.attempt_id,
+                expected_claim_id=args.expected_claim_id,
+                now=clock(),
+                claim_root=resolved_claim_root,
+                coordination_root=resolved_coordination_root,
+            )
+        except (ActivationConflictError, RunCoordinationConflictError) as error:
+            print(f"Activation was not committed: {error}", file=sys.stderr)
+            return 1
+        except RunCoordinationPublicationError as error:
+            print(f"Activation commit requires inspection: {error}", file=sys.stderr)
+            return 3
+        except RunCoordinationPersistenceError as error:
+            print(f"Activation was not committed: {error}", file=sys.stderr)
+            return 3
+        except (
+            ActivationError,
+            ControllerClaimError,
+            PacketError,
+            PreflightError,
+            RunCoordinationError,
+            RunError,
+        ) as error:
+            print(f"Blocked: {error}", file=sys.stderr)
+            return 2
+        print(render_activation_committed(record), end="")
+        return 0
+
+    if args.activation_command == "show":
+        try:
+            run, attempt, ready = inspect_activation(
+                args.run_path,
+                args.attempt_id,
+                coordination_root=resolved_coordination_root,
+            )
+        except (
+            ActivationError,
+            RunCoordinationError,
+            RunCoordinationPersistenceError,
+            RunError,
+        ) as error:
+            print(f"Blocked: {error}", file=sys.stderr)
+            return 2
+        print(render_activation_attempt(attempt, ready, run), end="")
+        return 0
+
+    raise AssertionError(f"unhandled activation command: {args.activation_command}")
+
+
 def _new_run_id() -> str:
     return f"RUN-{uuid.uuid4()}"
 
 
+def _new_publication_id() -> str:
+    return f"PUBLICATION-{uuid.uuid4()}"
+
+
 def _new_claim_id() -> str:
     return f"CLAIM-{uuid.uuid4()}"
+
+
+def _new_attempt_id() -> str:
+    return f"ACTIVATION-{uuid.uuid4()}"
+
+
+def _new_receipt_id() -> str:
+    return f"WORKER-READY-{uuid.uuid4()}"
 
 
 def _utc_now() -> datetime:
