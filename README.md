@@ -39,7 +39,8 @@ The first executable slice defines and validates:
 - run state derived from validated transition history;
 - a versioned execution-environment snapshot with observation provenance;
 - deterministic execution preflight over current run, packet, and environment facts;
-- plain-language packet, readiness, run, and preflight views.
+- exclusive controller claims with append-only transfer and recovery receipts;
+- plain-language packet, readiness, run, preflight, and controller-ownership views.
 
 Validate or inspect the included example after installing the package:
 
@@ -124,6 +125,62 @@ capabilities, verification routes, requested worker actions, and authority state
 A passing verdict is not an activation token. Preflight acquires no controller
 ownership, records no transition, starts no worker, and performs no external
 action. Mutable facts must be checked again during guarded activation.
+
+Acquire exclusive controller ownership for an initialized run:
+
+```sh
+factory run claim acquire \
+  examples/initialized-run/run.json \
+  --controller-id controller-1 \
+  --recorded-by operator
+
+factory run claim show examples/initialized-run/run.json
+```
+
+The CLI uses one coordination namespace at
+`<OS account home>/.software-factory/controller-claims`, anchored to the operating
+system account rather than the mutable `HOME` environment. It derives the claim
+directory from the immutable run ID; callers cannot select competing locations.
+Moving, renaming, or hard-linking the run record therefore does not create another
+claim location. The directory contains immutable, ordered JSON events. Initial
+acquisition creates it exclusively and never overwrites an existing claim. Current
+ownership is derived from the final validated event rather than a competing
+current-owner field.
+
+A planned handoff or explicit crash recovery must name the exact current claim:
+
+```sh
+factory run claim transfer ./run.json \
+  --expected-claim-id CLAIM-CURRENT \
+  --controller-id controller-2 \
+  --reason "planned handoff" \
+  --recorded-by operator
+
+factory run claim recover ./run.json \
+  --expected-claim-id CLAIM-CURRENT \
+  --controller-id controller-3 \
+  --reason "prior controller process exited" \
+  --recorded-by operator
+```
+
+Each successful change publishes the next receipt. Competing changes target the
+same next sequence, so only one can win. A claim never expires automatically:
+age may prompt inspection, but age alone cannot authorize takeover.
+
+| Exit code | `run claim` meaning |
+|---:|---|
+| `0` | The claim was acquired or changed, or a valid claim was shown. |
+| `1` | Ownership contention or a stale expected claim blocked the requested change. |
+| `2` | The run or claim is unreadable, malformed, ambiguous, or incomplete. |
+| `3` | Persistence did not complete cleanly; inspect the named claim before retrying. |
+
+A controller claim grants exclusive coordination ownership only. It does not grant
+authority to edit, commit, push, merge, deploy, or start a worker. Guarded worker
+activation remains a separate protocol step. This file-backed implementation
+requires a resolvable POSIX account-database entry and coordinates controllers
+running under that same local operating-system account. It fails closed rather
+than falling back to an environment-selected namespace. Multi-user and distributed
+coordination require a shared supervisor and are not claimed here.
 
 The repository deliberately contains no roadmap or implementation plan. Durable
 architectural decisions live in `adr/`; current behavior lives in code, tests,

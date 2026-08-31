@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from .controller_claims import ControllerClaimEvent, ControllerClaimHistory
 from .preflight import PreflightReport
 from .readiness import ReadinessReport, evaluate_readiness
 from .runs import RunRecord
@@ -135,6 +136,61 @@ def render_run(record: RunRecord) -> str:
 
 def render_run_initialized(record: RunRecord, path: str) -> str:
     return f"Run initialized at {path}.\n\n{render_run(record)}"
+
+
+def render_controller_claim(history: ControllerClaimHistory) -> str:
+    current = history.current
+    lines = [
+        f"{history.run_id} is claimed by {current.controller_id}.",
+        "",
+        "Current controller ownership",
+        f"  Claim ID: {current.claim_id}",
+        f"  Controller: {current.controller_id}",
+        f"  Established at: {current.at}",
+        f"  Recorded by: {current.recorded_by}",
+        "",
+        "Ownership history",
+    ]
+    for event in history.events:
+        lines.append(
+            f"  {event.sequence}. {event.kind} claim {event.claim_id} at {event.at}"
+        )
+        lines.append(f"     Controller: {event.controller_id}")
+        lines.append(f"     Reason: {event.reason}")
+        lines.append(f"     Recorded by: {event.recorded_by}")
+        if event.previous_claim_id is not None:
+            lines.append(f"     Replaced claim: {event.previous_claim_id}")
+
+    lines.extend(
+        [
+            "",
+            "Ownership boundary",
+            "  This claim does not expire automatically.",
+            "  Claim age alone never authorizes takeover.",
+            "  A transfer or recovery must name the exact current claim and leave a receipt.",
+            "  Controller ownership alone grants no authority to edit, commit, push, merge,",
+            "  deploy, start a worker, or perform another action.",
+        ]
+    )
+    return "\n".join(lines) + "\n"
+
+
+def render_controller_claim_acquired(
+    history: ControllerClaimHistory, path: str
+) -> str:
+    return f"Controller claim acquired at {path}.\n\n{render_controller_claim(history)}"
+
+
+def render_controller_claim_changed(
+    event: ControllerClaimEvent,
+    history: ControllerClaimHistory,
+    path: str,
+) -> str:
+    action = "transferred" if event.kind == "transferred" else "recovered"
+    return (
+        f"Controller ownership {action}; receipt recorded at "
+        f"{path}/{event.sequence:06d}.json.\n\n{render_controller_claim(history)}"
+    )
 
 
 def render_preflight(report: PreflightReport) -> str:

@@ -7,8 +7,26 @@ from collections.abc import Callable, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 
+from .controller_claims import (
+    ControllerClaimConflictError,
+    ControllerClaimError,
+    ControllerClaimHistory,
+    ControllerClaimPersistenceError,
+    ControllerClaimPublicationError,
+    controller_claim_path,
+    create_controller_claim,
+    create_controller_claim_change,
+    default_controller_claim_root,
+    ensure_controller_claim_root,
+    persist_controller_claim_change,
+    persist_initial_controller_claim,
+    require_claim_for_run,
+)
 from .preflight import ExecutionEnvironment, PreflightError, evaluate_preflight
 from .presentation import (
+    render_controller_claim,
+    render_controller_claim_acquired,
+    render_controller_claim_changed,
     render_preflight,
     render_readiness,
     render_run,
@@ -86,6 +104,42 @@ def build_parser() -> argparse.ArgumentParser:
         default=300,
         help="Maximum accepted environment snapshot age (default: 300).",
     )
+
+    claim = run_commands.add_parser(
+        "claim", help="Acquire and inspect exclusive controller ownership."
+    )
+    claim_commands = claim.add_subparsers(dest="claim_command", required=True)
+
+    claim_acquire = claim_commands.add_parser(
+        "acquire", help="Acquire the initial controller claim without overwriting one."
+    )
+    claim_acquire.add_argument("run_path", help="Path to an initialized run JSON record.")
+    claim_acquire.add_argument("--controller-id", required=True, help="Controller identity taking ownership.")
+    claim_acquire.add_argument("--recorded-by", required=True, help="Identity recording the acquisition.")
+
+    claim_show = claim_commands.add_parser(
+        "show", help="Explain current ownership and its immutable history."
+    )
+    claim_show.add_argument("run_path", help="Path to the claimed run JSON record.")
+
+    for command_name in ("transfer", "recover"):
+        change = claim_commands.add_parser(
+            command_name,
+            help=f"{command_name.title()} ownership and record an immutable receipt.",
+        )
+        change.add_argument("run_path", help="Path to the claimed run JSON record.")
+        change.add_argument(
+            "--expected-claim-id",
+            required=True,
+            help="Exact current claim ID that may be replaced.",
+        )
+        change.add_argument(
+            "--controller-id", required=True, help="Controller identity taking ownership."
+        )
+        change.add_argument("--reason", required=True, help="Why ownership is changing.")
+        change.add_argument(
+            "--recorded-by", required=True, help="Identity recording the ownership change."
+        )
     return parser
 
 
@@ -93,6 +147,8 @@ def main(
     argv: Sequence[str] | None = None,
     *,
     run_id_factory: Callable[[], str] | None = None,
+    claim_id_factory: Callable[[], str] | None = None,
+    claim_root: str | Path | None = None,
     clock: Callable[[], datetime] | None = None,
 ) -> int:
     args = build_parser().parse_args(argv)
@@ -102,6 +158,8 @@ def main(
         return _handle_run(
             args,
             run_id_factory=run_id_factory or _new_run_id,
+            claim_id_factory=claim_id_factory or _new_claim_id,
+            claim_root=Path(claim_root) if claim_root is not None else None,
             clock=clock or _utc_now,
         )
     raise AssertionError(f"unhandled command: {args.command}")
@@ -132,8 +190,18 @@ def _handle_run(
     args: argparse.Namespace,
     *,
     run_id_factory: Callable[[], str],
+    claim_id_factory: Callable[[], str],
+    claim_root: Path | None,
     clock: Callable[[], datetime],
 ) -> int:
+    if args.run_command == "claim":
+        return _handle_controller_claim(
+            args,
+            claim_id_factory=claim_id_factory,
+            claim_root=claim_root,
+            clock=clock,
+        )
+
     if args.run_command == "show":
         try:
             record = RunRecord.from_path(args.path)
@@ -208,8 +276,115 @@ def _handle_run(
     raise AssertionError(f"unhandled run command: {args.run_command}")
 
 
+def _handle_controller_claim(
+    args: argparse.Namespace,
+    *,
+    claim_id_factory: Callable[[], str],
+    claim_root: Path | None,
+    clock: Callable[[], datetime],
+) -> int:
+    try:
+        resolved_claim_root = (
+            claim_root if claim_root is not None else default_controller_claim_root()
+        )
+    except ControllerClaimPersistenceError as error:
+        print(f"Blocked: {error}", file=sys.stderr)
+        return 2
+
+    if args.claim_command == "show":
+        try:
+            run = RunRecord.from_path(args.run_path)
+            claim_path = controller_claim_path(run.id, resolved_claim_root)
+            history = require_claim_for_run(
+                run, ControllerClaimHistory.from_path(claim_path)
+            )
+        except (ControllerClaimError, RunError) as error:
+            print(f"Blocked: {error}", file=sys.stderr)
+            return 2
+        print(render_controller_claim(history), end="")
+        return 0
+
+    if args.claim_command == "acquire":
+        try:
+            run = RunRecord.from_path(args.run_path)
+            history = create_controller_claim(
+                run,
+                claim_id=claim_id_factory(),
+                controller_id=args.controller_id,
+                recorded_by=args.recorded_by,
+                now=clock(),
+            )
+            root = ensure_controller_claim_root(resolved_claim_root)
+            claim_path = controller_claim_path(run.id, root)
+            persist_initial_controller_claim(history, claim_path)
+        except ControllerClaimConflictError as error:
+            print(f"Not acquired: {error}", file=sys.stderr)
+            return 1
+        except (ControllerClaimError, RunError) as error:
+            print(f"Blocked: {error}", file=sys.stderr)
+            return 2
+        except ControllerClaimPublicationError as error:
+            print(f"Acquisition requires inspection: {error}", file=sys.stderr)
+            return 3
+        except ControllerClaimPersistenceError as error:
+            print(f"Not acquired: {error}", file=sys.stderr)
+            return 3
+        print(render_controller_claim_acquired(history, str(claim_path)), end="")
+        return 0
+
+    if args.claim_command in {"transfer", "recover"}:
+        kind = "transferred" if args.claim_command == "transfer" else "recovered"
+        try:
+            run = RunRecord.from_path(args.run_path)
+            claim_path = controller_claim_path(run.id, resolved_claim_root)
+            prior = require_claim_for_run(
+                run, ControllerClaimHistory.from_path(claim_path)
+            )
+            event = create_controller_claim_change(
+                prior,
+                kind=kind,
+                expected_claim_id=args.expected_claim_id,
+                claim_id=claim_id_factory(),
+                controller_id=args.controller_id,
+                reason=args.reason,
+                recorded_by=args.recorded_by,
+                now=clock(),
+            )
+            history = persist_controller_claim_change(event, claim_path)
+        except ControllerClaimConflictError as error:
+            print(
+                f"Requested ownership change was not published: {error}. "
+                "Re-read the current claim.",
+                file=sys.stderr,
+            )
+            return 1
+        except (ControllerClaimError, RunError) as error:
+            print(f"Blocked: {error}", file=sys.stderr)
+            return 2
+        except ControllerClaimPublicationError as error:
+            print(f"Ownership change requires inspection: {error}", file=sys.stderr)
+            return 3
+        except ControllerClaimPersistenceError as error:
+            print(
+                f"Requested ownership change was not published: {error}",
+                file=sys.stderr,
+            )
+            return 3
+        print(
+            render_controller_claim_changed(event, history, str(claim_path)),
+            end="",
+        )
+        return 0
+
+    raise AssertionError(f"unhandled claim command: {args.claim_command}")
+
+
 def _new_run_id() -> str:
     return f"RUN-{uuid.uuid4()}"
+
+
+def _new_claim_id() -> str:
+    return f"CLAIM-{uuid.uuid4()}"
 
 
 def _utc_now() -> datetime:
