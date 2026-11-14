@@ -1,3 +1,5 @@
+Before starting, read ~/projects/dev-home/standards.md (rules for every project). Library devlog for this project: devlog/software_factory/.
+
 # Software Factory repository contract
 
 ## Purpose
